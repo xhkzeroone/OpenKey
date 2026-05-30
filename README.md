@@ -83,6 +83,34 @@ $ brew install --cask openkey
 $ brew upgrade --cask openkey
 ```
 
+## Linux (Fcitx 5) - Beta
+Repo này có kèm addon cho **Fcitx 5** (build ra `openkey.so`) dùng OpenKey core ở `Sources/OpenKey/engine`.
+
+### Build & cài đặt (system-wide)
+Yêu cầu: CMake (>= 3.15) và gói dev của Fcitx 5 (Core/Config/Utils).
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+sudo cmake --install build
+```
+
+Restart Fcitx 5:
+```bash
+fcitx5 -r
+```
+
+### Build & cài đặt (không cần sudo)
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cmake --install build --prefix "$HOME/.local"
+fcitx5 -r
+```
+
+### Ghi chú
+- `build/` là thư mục sinh ra bởi CMake, **không commit lên git** (đã được ignore trong `.gitignore`).
+- Icon cho Linux dùng icon name `org.fcitx.Fcitx5.fcitx-openkey` (tránh GNOME/KDE fallback sai icon).
+
 ## Note - Lưu ý:
 OpenKey cần cấp quyền, vào *System Preferences -> Security & Privacy -> Accessibility*, kích hoạt `OpenKey.app`. **Không tắt nó khi đang dùng OpenKey**.
 ![Guide](https://raw.githubusercontent.com/tuyenvm/tuyenvm.github.io/master/images/openkey-guide.png "Accessibility").
@@ -94,7 +122,7 @@ OpenKey cần cấp quyền, vào *System Preferences -> Security & Privacy -> A
 
 ## Liên kết
 - [OpenKey cho Windows, xem chi tiết tại đây](https://github.com/tuyenvm/OpenKey/tree/master/Sources/OpenKey/win32)
-- [OpenKey cho Linux (đang phát triển)](https://github.com/tuyenvm/OpenKey/tree/master/Sources/OpenKey/linux)
+- [OpenKey cho Linux (Fcitx 5 addon)](src)
 ## Một điều nhỏ nhoi
 Đừng quên ủng hộ tác giả bằng cách mua ly cafe cho tác giả tỉnh ngủ nhé:  
 [Buy me a coffee ^^](https://tuyenvm.github.io/donate.html)  

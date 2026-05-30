@@ -217,6 +217,19 @@ void vKeyHandleEvent(const vKeyEvent& event,
 void startNewSession();
 
 /**
+ * Set current composing word (TypingWord) from internal OpenKey encoding.
+ *
+ * This helper is meant for embedding environments (e.g. input method frameworks)
+ * that maintain their own composing buffer, and want to reuse OpenKey algorithm
+ * without generating fake backspaces/key events.
+ *
+ * word element format is the same as TypingWord element:
+ *   - low 16-bit: KEY_* code
+ *   - CAPS_MASK, TONE_MASK/TONEW_MASK, MARK*_MASK ...
+ */
+void vSetCurrentWord(const Uint32 *word, const Uint8 &len);
+
+/**
  * do some task in english mode (use for macro)
  */
 void vEnglishMode(const vKeyEventState& state, const Uint16& data, const bool& isCaps, const bool& otherControlKey);
