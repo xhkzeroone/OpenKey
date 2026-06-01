@@ -1,0 +1,36 @@
+[Unit]
+Description=OpenKey Uinput Server (instance for user %i)
+After=local-fs.target
+ConditionPathExists=/dev/uinput
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/openkey-uinput-server -u %i
+Restart=on-failure
+RestartSec=0.25s
+
+# The server authorizes the client via SO_PEERCRED and only accepts connections
+# from the target user %i.
+User=%i
+SupplementaryGroups=uinput
+
+# Allow only /dev/uinput (plus standard pseudo devices).
+DevicePolicy=strict
+DeviceAllow=/dev/uinput rw
+
+# Hardening (keep light; uinput needs device access)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

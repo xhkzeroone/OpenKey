@@ -7,10 +7,11 @@ BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build}"
 PREFIX="${PREFIX:-/usr}"
 LIBDIR=""
 RESET_USER_DATA=0
+STOP_AUTOSTART=1
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--build-dir DIR] [--prefix PREFIX] [--reset-user-data]
+Usage: $(basename "$0") [--build-dir DIR] [--prefix PREFIX] [--reset-user-data] [--keep-autostart]
 
 Uninstalls the fcitx5-openkey addon files installed by CMake.
 Prefer using build/install_manifest.txt when available.
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       RESET_USER_DATA=1
       shift 1
       ;;
+    --keep-autostart)
+      STOP_AUTOSTART=0
+      shift 1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -46,6 +51,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$STOP_AUTOSTART" == "1" ]] && command -v systemctl >/dev/null 2>&1; then
+  unit="openkey-uinput-server@$(id -un).service"
+  echo "[openkey] Disabling autostart: $unit (best-effort)"
+  sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+fi
 
 manifest="$BUILD_DIR/install_manifest.txt"
 if [[ -f "$manifest" ]]; then
@@ -82,6 +94,20 @@ if [[ "$RESET_USER_DATA" == "1" ]]; then
   rm -rf ~/.config/fcitx5 ~/.local/share/fcitx5 ~/.cache/fcitx5 || true
 fi
 
+if [[ "$STOP_AUTOSTART" == "1" ]] && command -v systemctl >/dev/null 2>&1; then
+  # If build/install_manifest is missing, the unit file may still exist.
+  sudo rm -f -- /etc/systemd/system/openkey-uinput-server@.service >/dev/null 2>&1 || true
+  sudo rm -f -- /usr/lib/systemd/system/openkey-uinput-server@.service >/dev/null 2>&1 || true
+  sudo rm -f -- /lib/systemd/system/openkey-uinput-server@.service >/dev/null 2>&1 || true
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if command -v udevadm >/dev/null 2>&1 && [[ -d /etc/udev/rules.d ]]; then
+  sudo rm -f -- /etc/udev/rules.d/99-openkey-uinput.rules >/dev/null 2>&1 || true
+  sudo udevadm control --reload-rules >/dev/null 2>&1 || true
+  sudo udevadm trigger --name-match=uinput >/dev/null 2>&1 || true
+fi
+
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   echo "[openkey] Updating icon cache (optional)"
   sudo gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
@@ -91,4 +117,3 @@ echo "[openkey] Restarting fcitx5"
 fcitx5 -rd >/dev/null 2>&1 || true
 
 echo "[openkey] Done."
-
