@@ -105,3 +105,11 @@ install(
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+if(UNIX AND NOT APPLE)
+    add_executable(openkey-uinput-server
+        src/openkey_uinput_server.cpp
+    )
+    target_compile_features(openkey-uinput-server PRIVATE cxx_std_17)
+    install(TARGETS openkey-uinput-server DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()

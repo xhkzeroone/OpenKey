@@ -35,10 +35,10 @@ public:
 
 enum class ModeOverride {
     Auto,
-    ForceBackspaceRewrite,
+    ForceBackspaceRewriteDelta,
     ForceSurroundingText,
     ForcePreedit,
-    DirectCommit
+    DirectCommit,
 };
 FCITX_CONFIG_ENUM_NAME_WITH_I18N(ModeOverride, N_("Auto"),
                                  N_("Force Backspace Rewrite"),
@@ -81,6 +81,24 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                                   "CodeTable",
                                   N_("Output Code Table"),
                                   CodeTable::Unicode};
+                    fcitx::HiddenOption<int>
+                        bsRewriteCommitExtraUsec{
+                            this,
+                            "BackspaceRewriteCommitExtraUsec",
+                            N_("Backspace-rewrite: extra commit delay (usec)"),
+                            1000};
+                    fcitx::HiddenOption<int>
+                        bsRewriteCommitCapUsec{
+                            this,
+                            "BackspaceRewriteCommitCapUsec",
+                            N_("Backspace-rewrite: max commit delay (usec)"),
+                            180000};
+                    fcitx::HiddenOption<int>
+                        bsRewriteUinputInterKeyUsec{
+                            this,
+                            "BackspaceRewriteUinputInterKeyUsec",
+                            N_("Backspace-rewrite: uinput inter-backspace delay (usec)"),
+                            1000};
                     fcitx::Option<bool> freeMark{this,
                                                  "FreeMark",
                                                  N_("Free Mark"),
@@ -173,7 +191,7 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                                                  ""};);
 
 enum class RuntimeMode {
-    BackspaceRewrite,
+    BackspaceRewriteDelta,
     SurroundingText,
     Preedit,
     DirectCommit,
@@ -181,18 +199,19 @@ enum class RuntimeMode {
 
 struct OpenKeyState : public fcitx::InputContextProperty {
     // Backspace-rewrite mode state.
-    std::string rawBuffer;
     std::string shownText;
     bool hasRewrittenCurrentWord = false;
     bool rewriteLock = false;
-    bool isInjecting = false;
-    uint64_t injectingUntilUsec = 0;
+    bool waitingBackspaceAck = false;
+    int expectedBackspaces = 0;
+    int seenBackspaces = 0;
     std::vector<fcitx::Key> pendingKeys;
     uint64_t lastPhysicalKeyUsec = 0;
     std::unique_ptr<fcitx::EventSourceTime> rewriteTimer;
     std::unique_ptr<fcitx::EventSourceTime> commitTimer;
     std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
     std::string pendingConvertedText;
+    std::string pendingShownTextAfterCommit;
     fcitx::Key pendingBoundaryKey;
     bool hasPendingBoundaryKey = false;
 

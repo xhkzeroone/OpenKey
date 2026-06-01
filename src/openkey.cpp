@@ -6,10 +6,15 @@
 #include <algorithm>
 #include <functional>
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <utility>
+#include <unordered_set>
+#include <vector>
 
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
@@ -172,6 +177,16 @@ static bool endsWithASCIIInsensitive(const std::string &s, const char *suffix) {
     return true;
 }
 
+static bool startsWithASCIIInsensitive(const char *s, const char *prefix) {
+    if (!s || !prefix) return false;
+    const size_t n = std::strlen(prefix);
+    for (size_t i = 0; i < n; i++) {
+        if (!s[i]) return false;
+        if (toLowerASCII(s[i]) != toLowerASCII(prefix[i])) return false;
+    }
+    return true;
+}
+
 static bool equalsASCIIInsensitive(const std::string &a, const char *b) {
     const size_t n = std::strlen(b);
     if (a.size() != n) {
@@ -205,70 +220,258 @@ static bool isWineProgram(const std::string &program) {
     return false;
 }
 
-static bool shouldTriggerRewriteOnChunk(const std::string &rawBuffer) {
-    // Tone keys.
-    if (!rawBuffer.empty()) {
-        const char last = toLowerASCII(rawBuffer.back());
-        if (last == 's' || last == 'f' || last == 'r' || last == 'x' ||
-            last == 'j') {
-            return true;
-        }
+static std::string asciiLower(std::string s) {
+    for (char &c : s) {
+        c = toLowerASCII(c);
+    }
+    return s;
+}
+
+static std::string programBaseName(std::string program) {
+    const auto pos = program.find_last_of('/');
+    if (pos != std::string::npos) {
+        program.erase(0, pos + 1);
+    }
+    if (endsWithASCIIInsensitive(program, ".desktop")) {
+        program.resize(program.size() - std::strlen(".desktop"));
+    }
+    return program;
+}
+
+static bool isBrowserProgram(const std::string &program) {
+    if (program.empty()) {
+        return false;
     }
 
-    // Shape chunks.
-    static const char *kSuffixes[] = {"aa", "aw", "ee", "oo", "ow", "uw", "dd",
-                                      "iee", "yee", "uyee", "uow", "uoow",
-                                      "aau", "aay"};
-    for (const char *suf : kSuffixes) {
-        if (endsWithASCIIInsensitive(rawBuffer, suf)) {
+    const std::string base = asciiLower(programBaseName(program));
+
+    static const std::vector<std::string> kBrowserPatterns = {
+        "chrome",
+        "chromium",
+        "edge",
+        "msedge",
+        "brave",
+        "vivaldi",
+        "opera",
+        "coccoc",
+        "yandex",
+        "firefox",
+        "librewolf",
+        "waterfox",
+        "floorp",
+        "zen",
+        "epiphany",
+        "falkon",
+        "midori",
+        "qutebrowser",
+        "palemoon",
+        "basilisk",
+        "nyxt",
+        "otter",
+        "dooble",
+        "messenger"
+    };
+
+    for (const auto &pattern : kBrowserPatterns) {
+    if (base.find(asciiLower(pattern)) != std::string::npos) {
+        return true;
+    }
+}
+
+    return false;
+}
+
+
+static bool isX11Backend(fcitx::InputContext *ic) {
+    const char *frontend = ic ? ic->frontend() : nullptr;
+    if (frontend) {
+        if (startsWithASCIIInsensitive(frontend, "wayland")) {
+            return false;
+        }
+        if (equalsASCIIInsensitive(frontend, "xim")) {
             return true;
         }
     }
-    return false;
+    const char *sessionType = std::getenv("XDG_SESSION_TYPE");
+    if (sessionType && sessionType[0]) {
+        if (equalsASCIIInsensitive(sessionType, "x11")) {
+            return true;
+        }
+        if (equalsASCIIInsensitive(sessionType, "wayland")) {
+            return false;
+        }
+    }
+    const char *waylandDisplay = std::getenv("WAYLAND_DISPLAY");
+    if (waylandDisplay && waylandDisplay[0]) {
+        return false;
+    }
+    const char *display = std::getenv("DISPLAY");
+    return display && display[0];
+}
+
+
+static bool shouldUseDST(fcitx::InputContext *ic, int count) {
+    if (!ic) return false;
+
+    // Rule 1: app bị skip thủ công
+    if (isBrowserProgram(ic->program())) return false;
+
+    // Rule 3: app phải support surrounding text
+    if (ic->program().empty() &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        // Trường hợp này gần như chỉ xảy ra với Chrome/Chromium trên Wayland
+        return false;
+    }
+
+    const auto &st = ic->surroundingText();
+
+    // Rule 4: surrounding text phải hợp lệ
+    if (!st.isValid()) return false;
+
+    // Rule 5: không xử lý khi đang select text
+    if (st.cursor() != st.anchor()) return false;
+
+    // Rule 6: đủ ký tự để xóa
+    if (static_cast<unsigned int>(count) > st.cursor()) return false;
+
+    return true;
 }
 
 class BackspaceInjector {
 public:
-    ~BackspaceInjector() { destroyUinput(); }
+    ~BackspaceInjector() {
+        destroyServer();
+        destroyUinput();
+    }
 
     enum class Method {
         DeleteSurroundingText,
         Uinput,
-        ForwardKey,
         None,
     };
 
-    Method sendBackspaces(fcitx::InputContext *ic, int count, bool debug) {
-        if (!ic || count <= 0) {
+    Method sendBackspaces(fcitx::InputContext *ic, int count, bool debug,
+                          uint64_t uinputInterKeyUsec = 1500) {
+        (void)ic;
+        if (count <= 0) {
             return Method::None;
         }
-        // Prefer framework-level deletion when available (works better for
-        // some toolkits / fields like browser omnibox).
-        if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-            const auto &st = ic->surroundingText();
-            if (st.isValid() && st.cursor() == st.anchor() &&
-                fcitx::utf8::validate(st.text()) &&
-                st.cursor() <= fcitx::utf8::length(st.text()) &&
-                static_cast<unsigned int>(count) <= st.cursor()) {
-                ic->deleteSurroundingText(-count,
-                                          static_cast<unsigned int>(count));
-                return Method::DeleteSurroundingText;
+            // Dùng deleteSurroundingText cho app reliable, trừ Chrome
+        if (shouldUseDST(ic, count)) {
+            ic->deleteSurroundingText(-count, count);
+            return Method::DeleteSurroundingText;
+        }
+
+        if (ensureServer(debug)) {
+            if (sendBackspacesServer(count, debug)) {
+                return Method::Uinput;
             }
         }
         if (ensureUinput(debug)) {
-            sendBackspacesUinput(count);
+            sendBackspacesUinput(count, uinputInterKeyUsec);
             return Method::Uinput;
         }
-        // Fallback: forward BackSpace key to client.
-        for (int i = 0; i < count; i++) {
-            ic->forwardKey(fcitx::Key(FcitxKey_BackSpace));
-        }
-        return Method::ForwardKey;
+        return Method::None;
     }
+
+    bool uinputAvailable(bool debug) { return ensureUinput(debug); }
 
 private:
     int fd_ = -1;
     bool tried_ = false;
+    int serverFd_ = -1;
+
+    void destroyServer() {
+#ifdef __linux__
+        if (serverFd_ >= 0) {
+            ::close(serverFd_);
+        }
+#endif
+        serverFd_ = -1;
+    }
+
+    static std::string buildServerSocketName() {
+        struct passwd pwd {};
+        struct passwd *result = nullptr;
+        long bufSize = sysconf(_SC_GETPW_R_SIZE_MAX);
+        if (bufSize <= 0) {
+            bufSize = 16384;
+        }
+        std::vector<char> buf(static_cast<std::size_t>(bufSize));
+        std::string username;
+        const int res =
+            getpwuid_r(getuid(), &pwd, buf.data(), buf.size(), &result);
+        if (res == 0 && result) {
+            username = result->pw_name;
+        } else {
+            username = "unknown";
+        }
+
+        std::string name;
+        name.reserve(64);
+        name += "openkeysocket-";
+        name += username;
+        name += "-kb_socket";
+        constexpr std::size_t kMax = 100;
+        if (name.size() > kMax) {
+            name.resize(kMax);
+        }
+        return name;
+    }
+
+    bool ensureServer(bool debug) {
+#ifndef __linux__
+        (void)debug;
+        return false;
+#else
+        (void)debug;
+        if (serverFd_ >= 0) {
+            return true;
+        }
+
+        const int fd = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
+        if (fd < 0) {
+            return false;
+        }
+
+        const std::string socketName = buildServerSocketName();
+        struct sockaddr_un addr {};
+        addr.sun_family = AF_UNIX;
+        addr.sun_path[0] = '\0';
+        std::memcpy(&addr.sun_path[1], socketName.data(), socketName.size());
+        const socklen_t len = static_cast<socklen_t>(
+            offsetof(struct sockaddr_un, sun_path) + socketName.size() + 1);
+        if (::connect(fd, reinterpret_cast<struct sockaddr *>(&addr), len) !=
+            0) {
+            ::close(fd);
+            return false;
+        }
+        serverFd_ = fd;
+        return true;
+#endif
+    }
+
+    bool sendBackspacesServer(int count, bool debug) {
+#ifndef __linux__
+        (void)count;
+        (void)debug;
+        return false;
+#else
+        if (serverFd_ < 0) {
+            return false;
+        }
+        const ssize_t n =
+            ::send(serverFd_, &count, sizeof(count), MSG_NOSIGNAL);
+        if (n == static_cast<ssize_t>(sizeof(count))) {
+            return true;
+        }
+        if (debug) {
+            FCITX_WARN() << "openkey: uinput-server send failed; reconnect";
+        }
+        destroyServer();
+        return false;
+#endif
+    }
 
     void destroyUinput() {
 #ifdef __linux__
@@ -318,8 +521,7 @@ private:
             ::close(fd_);
             fd_ = -1;
             if (debug) {
-                FCITX_WARN() << "openkey: UI_DEV_CREATE failed; fallback to "
-                                "forwardKey backspace";
+                FCITX_WARN() << "openkey: UI_DEV_CREATE failed";
             }
             return false;
         }
@@ -338,7 +540,7 @@ private:
         (void)w;
     }
 
-    void sendBackspacesUinput(int count) {
+    void sendBackspacesUinput(int count, uint64_t interKeyUsec) {
         if (fd_ < 0 || count <= 0) {
             return;
         }
@@ -351,7 +553,10 @@ private:
             // tight bursts. Add a tiny delay to improve reliability under fast
             // typing.
             if (i + 1 < count) {
-                ::usleep(1500); // 1.5ms
+                if (interKeyUsec > 0) {
+                    ::usleep(static_cast<useconds_t>(
+                        std::min<uint64_t>(interKeyUsec, 1000000)));
+                }
             }
         }
     }
@@ -381,29 +586,6 @@ static unsigned int utf8CharCount(const std::string &s) {
         return 0;
     }
     return static_cast<unsigned int>(fcitx::utf8::length(s));
-}
-
-static bool shouldCommitBoundaryAsText(const fcitx::Key &rawKey) {
-    const uint32_t uni = fcitx::Key::keySymToUnicode(rawKey.sym());
-    if (uni >= 0x20 && uni <= 0x7E) {
-        // Space and common ASCII punctuation should be safe to commit as text.
-        return true;
-    }
-    return false;
-}
-
-static void applyBoundaryKey(fcitx::InputContext *ic, const fcitx::Key &rawKey) {
-    if (!ic) {
-        return;
-    }
-    if (shouldCommitBoundaryAsText(rawKey)) {
-        const std::string utf8 = fcitx::Key::keySymToUTF8(rawKey.sym());
-        if (!utf8.empty()) {
-            ic->commitString(utf8);
-            return;
-        }
-    }
-    ic->forwardKey(rawKey);
 }
 
 static int toOpenKeyInputType(InputType type) {
@@ -462,6 +644,9 @@ struct ModeDeps {
     BackspaceInjector *backspaceInjector = nullptr;
     std::weak_ptr<void> lifetimeWeak;
     std::function<bool()> debugEnabled;
+    std::function<uint64_t()> bsRewriteCommitExtraUsec;
+    std::function<uint64_t()> bsRewriteCommitCapUsec;
+    std::function<uint64_t()> bsRewriteUinputInterKeyUsec;
 };
 
 class BackspaceRewriteModeHandler final : public InputModeHandler {
@@ -471,39 +656,27 @@ public:
 
     bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                    OpenKeyState &state) override {
-        // This body is moved from OpenKeyEngine::handleBackspaceRewrite with
-        // minimal structural changes.
         auto key = event.key().normalize();
 
-        // Never do anything on key release in this mode.
         if (event.isRelease()) {
             return false;
         }
 
         const uint64_t nowUsec = fcitx::now(CLOCK_MONOTONIC);
 
-        // Guard: ignore injected backspace events that might loop back (uinput).
-        if (state.isInjecting && nowUsec <= state.injectingUntilUsec &&
-            key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
-            return false;
-        }
-
         // Do not swallow application shortcuts.
         if (hasCtrlAltSuperMeta(key)) {
             return false;
         }
 
-        auto clearWordState = [&state]() {
-            state.rawBuffer.clear();
-            state.shownText.clear();
-            state.hasRewrittenCurrentWord = false;
-            state.rewriteTimer.reset();
-        };
-
         const auto icRef = ic->watch();
         const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
         const auto adapterShared = deps_.adapter;
         const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        const uint64_t uinputInterKeyUsec =
+            deps_.bsRewriteUinputInterKeyUsec
+                ? deps_.bsRewriteUinputInterKeyUsec()
+                : 1500;
         auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
 
         auto stateFor = [this](fcitx::InputContext *ic2) -> OpenKeyState * {
@@ -511,6 +684,19 @@ public:
                 return nullptr;
             }
             return ic2->propertyFor(deps_.factory);
+        };
+
+        auto clearWordState = [&state]() {
+            state.shownText.clear();
+            state.hasRewrittenCurrentWord = false;
+            state.waitingBackspaceAck = false;
+            state.expectedBackspaces = 0;
+            state.seenBackspaces = 0;
+            state.pendingConvertedText.clear();
+            state.pendingShownTextAfterCommit.clear();
+            state.pendingKeys.clear();
+            state.commitTimer.reset();
+            state.rewriteLock = false;
         };
 
         auto drainPendingKeys = [this, icRef, lifetimeWeak, stateFor]() {
@@ -531,260 +717,162 @@ public:
             for (const auto &k : keys) {
                 fcitx::KeyEvent synthetic(ic2, k, false /* release */,
                                           0 /* time */);
-                handleKey(ic2, synthetic, *st);
-            }
-        };
-
-        auto scheduleCommitAfterBackspace = [this, &state, icRef, lifetimeWeak,
-                                             loop, stateFor,
-                                             drainPendingKeys](uint64_t delayUsec) {
-            state.commitTimer.reset();
-            if (!loop) {
-                return;
-            }
-            const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
-            state.commitTimer = loop->addTimeEvent(
-                CLOCK_MONOTONIC, deadline, 0,
-                [this, icRef, lifetimeWeak, stateFor,
-                 drainPendingKeys](fcitx::EventSourceTime *, uint64_t) {
-                    // One-shot.
-                    if (lifetimeWeak.expired()) {
-                        return false;
-                    }
-                    auto *ic2 = icRef.get();
-                    if (!ic2) {
-                        return false;
-                    }
-                    auto *statePtr = stateFor(ic2);
-                    if (!statePtr) {
-                        return false;
-                    }
-                    // Keep the EventSourceTime alive until callback returns.
-                    auto _timer = std::move(statePtr->commitTimer);
-
-                    const std::string converted = statePtr->pendingConvertedText;
-                    statePtr->pendingConvertedText.clear();
-
-                    // Commit converted Vietnamese text.
-                    if (!converted.empty()) {
-                        ic2->commitString(converted);
-                        statePtr->shownText = converted;
-                        statePtr->hasRewrittenCurrentWord = true;
-                    }
-
-                    // Forward boundary key if requested.
-                    if (statePtr->hasPendingBoundaryKey) {
-                        applyBoundaryKey(ic2, statePtr->pendingBoundaryKey);
-                        statePtr->pendingBoundaryKey = fcitx::Key(FcitxKey_None);
-                        statePtr->hasPendingBoundaryKey = false;
-                        // Boundary ends the current word.
-                        statePtr->rawBuffer.clear();
-                        statePtr->shownText.clear();
-                        statePtr->hasRewrittenCurrentWord = false;
-                    }
-
-                    statePtr->isInjecting = false;
-                    statePtr->injectingUntilUsec = 0;
-                    statePtr->rewriteLock = false;
-
-                    drainPendingKeys();
-                    return false;
-                });
-            if (state.commitTimer) {
-                state.commitTimer->setOneShot();
-            }
-        };
-
-        auto beginRewrite = [this, ic, &state, scheduleCommitAfterBackspace,
-                             nowUsec, adapterShared, debug](const char *reason) {
-            if (state.rewriteLock) {
-                return;
-            }
-            if (state.rawBuffer.empty()) {
-                return;
-            }
-            if (!adapterShared) {
-                return;
-            }
-
-            adapterShared->setCodeTable(state.codeTable);
-            const std::string converted =
-                adapterShared->convertRawBuffer(state.rawBuffer);
-            if (converted.empty() || converted == state.shownText) {
-                return;
-            }
-
-            if (debug) {
-                FCITX_INFO() << "openkey: bs-rewrite start program=" << state.program
-                             << " reason=" << reason
-                             << " rawBuffer=" << state.rawBuffer
-                             << " shownText=" << state.shownText
-                             << " converted=" << converted;
-            }
-
-            state.rewriteTimer.reset();
-            state.rewriteLock = true;
-            state.isInjecting = true;
-            state.pendingConvertedText = converted;
-
-            const int bsCount =
-                static_cast<int>(fcitx::utf8::length(state.shownText));
-            if (bsCount > 0) {
-                const auto method =
-                    deps_.backspaceInjector->sendBackspaces(ic, bsCount, debug);
-                uint64_t commitDelayUsec = 15000;
-                // NOTE: deleting via client protocol (deleteSurroundingText) or
-                // forwarded keys tends to be more asynchronous. uinput is also
-                // asynchronous when the target app is busy. Use a slightly
-                // longer delay for stability when typing fast.
-                if (method == BackspaceInjector::Method::DeleteSurroundingText ||
-                    method == BackspaceInjector::Method::ForwardKey) {
-                    commitDelayUsec = 45000; // 45ms
-                } else if (method == BackspaceInjector::Method::Uinput) {
-                    // Scale with deletion size, capped.
-                    commitDelayUsec = std::min<uint64_t>(
-                        60000, 25000 + static_cast<uint64_t>(bsCount) * 2000);
+                const bool handled = handleKey(ic2, synthetic, *st);
+                if (!handled && !synthetic.accepted()) {
+                    ic2->forwardKey(k);
                 }
-                // Allow enough time for injected backspaces to loop back
-                // (uinput), with extra slack for busy clients.
-                state.injectingUntilUsec = nowUsec +
-                                           std::min<uint64_t>(250000,
-                                                              commitDelayUsec + 80000);
-                scheduleCommitAfterBackspace(commitDelayUsec);
-                return;
             }
-
-            // Commit after a brief delay so deletion is processed first.
-            state.injectingUntilUsec = nowUsec + 50000; // 50ms
-            scheduleCommitAfterBackspace(15000); // 15ms
         };
 
-        auto scheduleRewrite =
-            [this, icRef, lifetimeWeak, adapterShared, debug, loop, stateFor,
-             &state](uint64_t delayUsec, const char *reason) {
-                if (state.rawBuffer.empty()) {
-                    return;
-                }
-                state.rewriteTimer.reset();
+        auto scheduleCommitAfterBackspace =
+            [this, icRef, lifetimeWeak, loop, stateFor, &state,
+             drainPendingKeys](uint64_t delayUsec) {
+                state.commitTimer.reset();
                 if (!loop) {
                     return;
                 }
-                const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
-                state.rewriteTimer = loop->addTimeEvent(
+                const uint64_t deadline =
+                    fcitx::now(CLOCK_MONOTONIC) + delayUsec;
+                state.commitTimer = loop->addTimeEvent(
                     CLOCK_MONOTONIC, deadline, 0,
-                    [this, icRef, lifetimeWeak, adapterShared, debug, loop,
-                     stateFor, reason](fcitx::EventSourceTime *, uint64_t) {
-                        if (lifetimeWeak.expired() || !adapterShared) {
+                    [this, icRef, lifetimeWeak, stateFor,
+                     drainPendingKeys](fcitx::EventSourceTime *, uint64_t) {
+                        if (lifetimeWeak.expired()) {
                             return false;
                         }
                         auto *ic2 = icRef.get();
                         if (!ic2) {
                             return false;
                         }
-                        auto *statePtr = stateFor(ic2);
-                        if (!statePtr) {
+                        auto *st = stateFor(ic2);
+                        if (!st) {
                             return false;
                         }
-                        // Keep the EventSourceTime alive until callback returns.
-                        auto _timer = std::move(statePtr->rewriteTimer);
-                        if (statePtr->rewriteLock) {
-                            return false;
+                        auto _timer = std::move(st->commitTimer);
+
+                        const std::string commitText =
+                            std::move(st->pendingConvertedText);
+                        const std::string shownAfter =
+                            std::move(st->pendingShownTextAfterCommit);
+                        st->pendingConvertedText.clear();
+                        st->pendingShownTextAfterCommit.clear();
+
+                        if (!commitText.empty()) {
+                            ic2->commitString(commitText);
                         }
-                        // beginRewrite is local; replicate minimal call here.
-                        adapterShared->setCodeTable(statePtr->codeTable);
-                        const std::string converted =
-                            adapterShared->convertRawBuffer(
-                                statePtr->rawBuffer);
-                        if (converted.empty() ||
-                            converted == statePtr->shownText) {
-                            return false;
-                        }
-                        if (debug) {
-                            FCITX_INFO()
-                                << "openkey: bs-rewrite timer program="
-                                << statePtr->program << " reason=" << reason
-                                << " rawBuffer=" << statePtr->rawBuffer
-                                << " shownText=" << statePtr->shownText
-                                << " converted=" << converted;
-                        }
-                        statePtr->rewriteLock = true;
-                        statePtr->isInjecting = true;
-                        const uint64_t now2 = fcitx::now(CLOCK_MONOTONIC);
-                        statePtr->pendingConvertedText = converted;
-                        const int bsCount = static_cast<int>(
-                            fcitx::utf8::length(statePtr->shownText));
-                        uint64_t commitDelayUsec = 15000;
-                        if (bsCount > 0) {
-                            const auto method = deps_.backspaceInjector->sendBackspaces(
-                                ic2, bsCount, debug);
-                            if (method ==
-                                    BackspaceInjector::Method::DeleteSurroundingText ||
-                                method == BackspaceInjector::Method::ForwardKey) {
-                                commitDelayUsec = 45000;
-                            } else if (method == BackspaceInjector::Method::Uinput) {
-                                commitDelayUsec = std::min<uint64_t>(
-                                    60000,
-                                    25000 + static_cast<uint64_t>(bsCount) * 2000);
-                            }
-                        }
-                        statePtr->injectingUntilUsec =
-                            now2 + std::min<uint64_t>(250000, commitDelayUsec + 80000);
-                        // Commit after a brief delay.
-                        statePtr->commitTimer.reset();
-                        OpenKeyState *st2 = statePtr;
-                        const uint64_t commitDeadline =
-                            fcitx::now(CLOCK_MONOTONIC) + commitDelayUsec;
-                        st2->commitTimer = loop->addTimeEvent(
-                            CLOCK_MONOTONIC, commitDeadline, 0,
-                            [this, icRef, lifetimeWeak, st2, stateFor](
-                                fcitx::EventSourceTime *, uint64_t) {
-                                if (lifetimeWeak.expired()) {
-                                    return false;
-                                }
-                                auto *ic3 = icRef.get();
-                                if (!ic3 || !st2) {
-                                    return false;
-                                }
-                                // Keep the EventSourceTime alive until callback
-                                // returns.
-                                auto _timer = std::move(st2->commitTimer);
-                                const std::string conv =
-                                    st2->pendingConvertedText;
-                                st2->pendingConvertedText.clear();
-                                if (!conv.empty()) {
-                                    ic3->commitString(conv);
-                                    st2->shownText = conv;
-                                    st2->hasRewrittenCurrentWord = true;
-                                }
-                                st2->isInjecting = false;
-                                st2->injectingUntilUsec = 0;
-                                st2->rewriteLock = false;
-                                // Drain any keys collected during lock.
-                                auto keys = std::move(st2->pendingKeys);
-                                st2->pendingKeys.clear();
-                                for (const auto &k : keys) {
-                                    fcitx::KeyEvent syn(ic3, k, false, 0);
-                                    handleKey(ic3, syn, *st2);
-                                }
-                                return false;
-                            });
-                        if (st2->commitTimer) {
-                            st2->commitTimer->setOneShot();
-                        }
+                        st->shownText = shownAfter;
+                        st->hasRewrittenCurrentWord = !st->shownText.empty();
+                        st->rewriteLock = false;
+                        st->waitingBackspaceAck = false;
+                        st->expectedBackspaces = 0;
+                        st->seenBackspaces = 0;
+
+                        drainPendingKeys();
                         return false;
                     });
-                if (state.rewriteTimer) {
-                    state.rewriteTimer->setOneShot();
-                }
-
-                if (deps_.debugEnabled && deps_.debugEnabled()) {
-                    FCITX_INFO()
-                        << "openkey: bs-rewrite schedule program=" << state.program
-                        << " reason=" << reason << " delayUsec=" << delayUsec
-                        << " rawBuffer=" << state.rawBuffer
-                        << " shownText=" << state.shownText;
+                if (state.commitTimer) {
+                    state.commitTimer->setOneShot();
                 }
             };
+
+auto applyWordDelta = [&, this](const std::string &newWord,
+                                const char *reason) -> bool {
+    if (!deps_.backspaceInjector) {
+        return false;
+    }
+    if (!fcitx::utf8::validate(state.shownText) ||
+        !fcitx::utf8::validate(newWord)) {
+        clearWordState();
+        return false;
+    }
+
+    const std::size_t prefixLen =
+        commonPrefixBytesUTF8Boundary(state.shownText, newWord);
+    unsigned int deleteCount =
+        utf8CharCount(state.shownText.substr(prefixLen));
+    std::string commitText = newWord.substr(prefixLen);
+    if (deleteCount > 128) {
+        deleteCount = utf8CharCount(state.shownText);
+        commitText = newWord;
+    }
+
+    if (debug) {
+        FCITX_INFO() << "openkey: bs-delta program=" << state.program
+                     << " reason=" << reason
+                     << " from=" << state.shownText
+                     << " to=" << newWord
+                     << " delete=" << deleteCount
+                     << " commit=" << commitText;
+    }
+
+    if (deleteCount == 0) {
+        if (!commitText.empty()) {
+            ic->commitString(commitText);
+        }
+        state.shownText = newWord;
+        state.hasRewrittenCurrentWord = !state.shownText.empty();
+        event.filterAndAccept();
+        return true;
+    }
+
+    // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
+    const auto method = deps_.backspaceInjector->sendBackspaces(
+        ic, static_cast<int>(deleteCount), debug, uinputInterKeyUsec);
+
+    if (method == BackspaceInjector::Method::DeleteSurroundingText) {
+        // Không cần chờ ack, commit ngay
+        if (!commitText.empty()) {
+            ic->commitString(commitText);
+        }
+        state.shownText = newWord;
+        state.hasRewrittenCurrentWord = !state.shownText.empty();
+        event.filterAndAccept();
+        return true;
+    }
+
+    if (method == BackspaceInjector::Method::Uinput) {
+        // Inject thêm 1 backspace extra làm trigger ack
+        // (N backspace xóa text + 1 backspace loop back báo xong)
+        deps_.backspaceInjector->sendBackspaces(
+            ic, 1, debug, uinputInterKeyUsec);
+
+        state.rewriteLock = true;
+        state.waitingBackspaceAck = true;
+        state.expectedBackspaces = static_cast<int>(deleteCount) + 1;
+        state.seenBackspaces = 0;
+        state.pendingConvertedText = std::move(commitText);
+        state.pendingShownTextAfterCommit = newWord;
+        event.filterAndAccept();
+        return true;
+    }
+
+    // Uinput không available
+    clearWordState();
+    return false;
+};
+        if (state.waitingBackspaceAck) {
+            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
+                state.seenBackspaces++;
+                if (state.seenBackspaces < state.expectedBackspaces) {
+                    // Let the injected backspaces reach the app to delete.
+                    return false;
+                }
+
+                // Filter the final trigger backspace (extra +1).
+                event.filterAndAccept();
+
+                const uint64_t extraUsec = deps_.bsRewriteCommitExtraUsec
+                                               ? deps_.bsRewriteCommitExtraUsec()
+                                               : 0;
+                scheduleCommitAfterBackspace(extraUsec);
+                return true;
+            }
+
+            // Buffer any other keys during deletion and replay after commit.
+            state.pendingKeys.push_back(key);
+            event.filterAndAccept();
+            return true;
+        }
 
         // If we are currently rewriting, queue and swallow all physical keys.
         if (state.rewriteLock) {
@@ -799,42 +887,26 @@ public:
             return false;
         }
 
-        // Escape cancels current composing word (boundary) but should not be
-        // swallowed (let application handle Escape).
+        // Escape ends current composing word.
         if (key.check(FcitxKey_Escape)) {
             clearWordState();
             return false;
         }
 
-        // Physical BackSpace: delete one visible rune and resync rawBuffer.
+        // Physical BackSpace: delete one visible rune.
         if (key.check(FcitxKey_BackSpace)) {
-            if (state.rawBuffer.empty() && state.shownText.empty()) {
+            if (state.shownText.empty()) {
+                return false;
+            }
+            const auto method = deps_.backspaceInjector->sendBackspaces(
+                ic, 1, debug, uinputInterKeyUsec);
+            if (method != BackspaceInjector::Method::Uinput) {
+                clearWordState();
                 return false;
             }
             event.filterAndAccept();
-
-            deps_.backspaceInjector->sendBackspaces(ic, 1, debug);
-            if (!state.shownText.empty()) {
-                state.shownText = utf8DropLastN(state.shownText, 1);
-            }
-
-            if (!state.rawBuffer.empty()) {
-                state.rawBuffer.pop_back();
-            }
-            // Best-effort: trim rawBuffer until conversion matches shownText.
-            for (int i = 0; i < 16 && !state.rawBuffer.empty(); i++) {
-                adapterShared->setCodeTable(state.codeTable);
-                const std::string converted =
-                    adapterShared->convertRawBuffer(state.rawBuffer);
-                if (converted == state.shownText) {
-                    break;
-                }
-                state.rawBuffer.pop_back();
-            }
-
-            if (state.rawBuffer.empty()) {
-                state.hasRewrittenCurrentWord = false;
-            }
+            state.shownText = utf8DropLastN(state.shownText, 1);
+            state.hasRewrittenCurrentWord = !state.shownText.empty();
             return true;
         }
 
@@ -843,68 +915,31 @@ public:
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
-            // Boundary keys: rewrite immediately (if needed), then forward the
-            // original boundary key and clear word state.
+            // Boundary keys: end current word and let application handle it.
             if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
                 key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
                 key.check(FcitxKey_Tab)) {
-                if (!state.rawBuffer.empty()) {
-                    event.filterAndAccept();
-                    // Stash boundary key and rewrite immediately.
-                    state.hasPendingBoundaryKey = true;
-                    state.pendingBoundaryKey = event.rawKey();
-                    beginRewrite("boundary");
-                    // If rewrite didn't happen, still forward boundary and clear.
-                    if (!state.rewriteLock) {
-                        applyBoundaryKey(ic, event.rawKey());
-                        clearWordState();
-                    }
-                    return true;
-                }
+                clearWordState();
                 return false;
             }
 
-            // Word characters: update state and commit raw char to client.
+            // Word characters: apply OpenKey changes immediately via delta.
             if (isComposingASCII(c)) {
-                state.rawBuffer.push_back(c);
-                const std::string vis = fcitx::Key::keySymToUTF8(key.sym());
-                state.lastPhysicalKeyUsec = nowUsec;
-
-                event.filterAndAccept();
-                if (!state.hasRewrittenCurrentWord) {
-                    if (!vis.empty()) {
-                        state.shownText += vis;
-                        ic->commitString(vis);
-                    }
-
-                    // Schedule rewrites based on chunks and idle.
-                    if (shouldTriggerRewriteOnChunk(state.rawBuffer)) {
-                        scheduleRewrite(30000, "chunk"); // 30ms
-                    } else {
-                         scheduleRewrite(100000, "idle"); // 100ms
-                    }
-                    return true;
+                if (!adapterShared) {
+                    return false;
                 }
-
-                // Converted phase: keep the word active and reconvert the full
-                // rawBuffer until a boundary is typed. Do NOT commit the raw
-                // character; a short rewrite will update the visible word.
-                scheduleRewrite(30000, "post_rewrite"); // 30ms
-                return true;
+                adapterShared->setCodeTable(state.codeTable);
+                const auto r =
+                    adapterShared->processAsciiKey(state.shownText, c);
+                if (!r.handled) {
+                    return false;
+                }
+                state.lastPhysicalKeyUsec = nowUsec;
+                return applyWordDelta(r.newWord, "ascii");
             }
 
             // Other printable ASCII: treat as boundary of current word.
-            if (!state.rawBuffer.empty()) {
-                event.filterAndAccept();
-                state.hasPendingBoundaryKey = true;
-                state.pendingBoundaryKey = event.rawKey();
-                beginRewrite("other_ascii");
-                if (!state.rewriteLock) {
-                    applyBoundaryKey(ic, event.rawKey());
-                    clearWordState();
-                }
-                return true;
-            }
+            clearWordState();
             return false;
         }
 
@@ -930,6 +965,18 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     deps.backspaceInjector = &g_backspaceInjector;
     deps.lifetimeWeak = lifetime_;
     deps.debugEnabled = [this]() { return debugEnabled(); };
+    deps.bsRewriteCommitExtraUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteCommitExtraUsec.value()));
+    };
+    deps.bsRewriteCommitCapUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteCommitCapUsec.value()));
+    };
+    deps.bsRewriteUinputInterKeyUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.bsRewriteUinputInterKeyUsec.value()));
+    };
     backspaceRewriteHandler_ =
         std::make_unique<BackspaceRewriteModeHandler>(std::move(deps));
     reloadConfig();
@@ -964,7 +1011,7 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
             return "Surrounding";
         case RuntimeMode::Preedit:
             return "Preedit";
-        case RuntimeMode::BackspaceRewrite:
+        case RuntimeMode::BackspaceRewriteDelta:
             return "Backspace";
         case RuntimeMode::DirectCommit:
             return "Direct";
@@ -991,7 +1038,7 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
         return "Surrounding";
     case RuntimeMode::Preedit:
         return "Preedit";
-    case RuntimeMode::BackspaceRewrite:
+    case RuntimeMode::BackspaceRewriteDelta:
         return "Backspace";
     case RuntimeMode::DirectCommit:
         return "Direct";
@@ -1078,16 +1125,17 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
-    state->rawBuffer.clear();
     state->shownText.clear();
     state->hasRewrittenCurrentWord = false;
     state->rewriteLock = false;
-    state->isInjecting = false;
-    state->injectingUntilUsec = 0;
+    state->waitingBackspaceAck = false;
+    state->expectedBackspaces = 0;
+    state->seenBackspaces = 0;
     state->pendingKeys.clear();
     state->rewriteTimer.reset();
     state->commitTimer.reset();
     state->pendingConvertedText.clear();
+    state->pendingShownTextAfterCommit.clear();
     state->hasPendingBoundaryKey = false;
     state->composing.clear();
     state->macroBuffer.clear();
@@ -1113,16 +1161,17 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                           fcitx::InputContextEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
-    state->rawBuffer.clear();
     state->shownText.clear();
     state->hasRewrittenCurrentWord = false;
     state->rewriteLock = false;
-    state->isInjecting = false;
-    state->injectingUntilUsec = 0;
+    state->waitingBackspaceAck = false;
+    state->expectedBackspaces = 0;
+    state->seenBackspaces = 0;
     state->pendingKeys.clear();
     state->rewriteTimer.reset();
     state->commitTimer.reset();
     state->pendingConvertedText.clear();
+    state->pendingShownTextAfterCommit.clear();
     state->hasPendingBoundaryKey = false;
     state->composing.clear();
     state->macroBuffer.clear();
@@ -1135,6 +1184,12 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
     // Password field should never attempt to do any composition.
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
         return RuntimeMode::DirectCommit;
+    }
+
+    // X11 browser fields (omnibox/search boxes) are often fragile with
+    // surrounding-text/backspace rewrite. Force preedit for better UX.
+    if (isX11Backend(ic) && isBrowserProgram(s.program)) {
+        return RuntimeMode::Preedit;
     }
 
     // Wine/Proton clients are very sensitive to surrounding-text/backspace
@@ -1166,7 +1221,8 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
 
     const bool clientPreeditSupported =
         ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
-    const bool backspaceRewriteSupported = true;
+    const bool backspaceRewriteSupported =
+        g_backspaceInjector.uinputAvailable(debugEnabled());
 
     // Explicit overrides.
     switch (config_.mode.value()) {
@@ -1178,23 +1234,22 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
                                        : RuntimeMode::Preedit;
     case ModeOverride::ForcePreedit:
         return RuntimeMode::Preedit;
-    case ModeOverride::ForceBackspaceRewrite:
-        // If backspace rewrite can't be used for any reason, fallback to preedit.
-        return backspaceRewriteSupported ? RuntimeMode::BackspaceRewrite
+    case ModeOverride::ForceBackspaceRewriteDelta:
+        return backspaceRewriteSupported ? RuntimeMode::BackspaceRewriteDelta
                                         : RuntimeMode::Preedit;
     case ModeOverride::Auto:
         break;
     }
 
-    // Auto mode priority: SurroundingText -> Preedit -> BackspaceRewrite -> DirectCommit.
+    // Auto mode priority: SurroundingText -> BackspaceRewrite -> Preedit -> DirectCommit.
     if (canUseSurroundingText()) {
         return RuntimeMode::SurroundingText;
     }
+    if (backspaceRewriteSupported) {
+        return RuntimeMode::BackspaceRewriteDelta;
+    }
     if (clientPreeditSupported) {
         return RuntimeMode::Preedit;
-    }
-    if (backspaceRewriteSupported) {
-        return RuntimeMode::BackspaceRewrite;
     }
     return RuntimeMode::DirectCommit;
 }
@@ -1626,392 +1681,6 @@ bool OpenKeyEngine::handleBackspaceRewrite(fcitx::InputContext *ic,
     if (backspaceRewriteHandler_) {
         return backspaceRewriteHandler_->handleKey(ic, event, state);
     }
-    auto key = event.key().normalize();
-
-    // Never do anything on key release in this mode.
-    if (event.isRelease()) {
-        return false;
-    }
-
-    const uint64_t nowUsec = fcitx::now(CLOCK_MONOTONIC);
-
-    // Guard: ignore injected backspace events that might loop back (uinput).
-    if (state.isInjecting && nowUsec <= state.injectingUntilUsec &&
-        key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
-        return false;
-    }
-
-    // Do not swallow application shortcuts.
-    if (hasCtrlAltSuperMeta(key)) {
-        return false;
-    }
-
-    auto clearWordState = [&state]() {
-        state.rawBuffer.clear();
-        state.shownText.clear();
-        state.hasRewrittenCurrentWord = false;
-        state.rewriteTimer.reset();
-    };
-
-    const auto icRef = ic->watch();
-    const std::weak_ptr<void> lifetimeWeak = lifetime_;
-    const auto adapterShared = adapter_;
-    const bool debug = debugEnabled();
-    auto *loop = &instance_->eventLoop();
-
-    auto drainPendingKeys = [this, icRef, lifetimeWeak]() {
-        if (lifetimeWeak.expired()) {
-            return;
-        }
-        auto *ic2 = icRef.get();
-        if (!ic2) {
-            return;
-        }
-        auto *st = stateFor(ic2);
-        if (!st || st->pendingKeys.empty()) {
-            return;
-        }
-        // Move out to avoid re-entrancy issues.
-        auto keys = std::move(st->pendingKeys);
-        st->pendingKeys.clear();
-        for (const auto &k : keys) {
-            fcitx::KeyEvent synthetic(ic2, k, false /* release */,
-                                      0 /* time */);
-            handleBackspaceRewrite(ic2, synthetic, *st);
-        }
-    };
-
-    auto scheduleCommitAfterBackspace = [this, &state, icRef, lifetimeWeak, loop,
-                                         drainPendingKeys](uint64_t delayUsec) {
-        state.commitTimer.reset();
-        const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
-        state.commitTimer = loop->addTimeEvent(
-            CLOCK_MONOTONIC, deadline, 0,
-            [this, icRef, lifetimeWeak, drainPendingKeys](fcitx::EventSourceTime *,
-                                            uint64_t) {
-                // One-shot.
-                if (lifetimeWeak.expired()) {
-                    return false;
-                }
-                auto *ic2 = icRef.get();
-                if (!ic2) {
-                    return false;
-                }
-                auto *statePtr = stateFor(ic2);
-                if (!statePtr) {
-                    return false;
-                }
-                // Keep the EventSourceTime alive until callback returns.
-                auto _timer = std::move(statePtr->commitTimer);
-
-                const std::string converted = statePtr->pendingConvertedText;
-                statePtr->pendingConvertedText.clear();
-
-                // Commit converted Vietnamese text.
-                if (!converted.empty()) {
-                    ic2->commitString(converted);
-                    statePtr->shownText = converted;
-                    statePtr->hasRewrittenCurrentWord = true;
-                }
-
-                // Forward boundary key if requested.
-                if (statePtr->hasPendingBoundaryKey) {
-                    applyBoundaryKey(ic2, statePtr->pendingBoundaryKey);
-                    statePtr->pendingBoundaryKey = fcitx::Key(FcitxKey_None);
-                    statePtr->hasPendingBoundaryKey = false;
-                    // Boundary ends the current word.
-                    statePtr->rawBuffer.clear();
-                    statePtr->shownText.clear();
-                    statePtr->hasRewrittenCurrentWord = false;
-                }
-
-                statePtr->isInjecting = false;
-                statePtr->injectingUntilUsec = 0;
-                statePtr->rewriteLock = false;
-
-                drainPendingKeys();
-                return false;
-            });
-        state.commitTimer->setOneShot();
-    };
-
-    auto beginRewrite = [this, ic, &state, scheduleCommitAfterBackspace,
-                         nowUsec](const char *reason) {
-        if (state.rewriteLock) {
-            return;
-        }
-        if (state.rawBuffer.empty()) {
-            return;
-        }
-
-        adapter_->setCodeTable(state.codeTable);
-        const std::string converted = adapter_->convertRawBuffer(state.rawBuffer);
-        if (converted.empty() || converted == state.shownText) {
-            return;
-        }
-
-        if (debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-rewrite start program=" << state.program
-                         << " reason=" << reason
-                         << " rawBuffer=" << state.rawBuffer
-                         << " shownText=" << state.shownText
-                         << " converted=" << converted;
-        }
-
-        state.rewriteTimer.reset();
-        state.rewriteLock = true;
-        state.isInjecting = true;
-        state.pendingConvertedText = converted;
-
-        const int bsCount = static_cast<int>(fcitx::utf8::length(state.shownText));
-        if (bsCount > 0) {
-            const auto method =
-                g_backspaceInjector.sendBackspaces(ic, bsCount, debugEnabled());
-            uint64_t commitDelayUsec = 15000;
-            if (method == BackspaceInjector::Method::DeleteSurroundingText ||
-                method == BackspaceInjector::Method::ForwardKey) {
-                commitDelayUsec = 45000;
-            } else if (method == BackspaceInjector::Method::Uinput) {
-                commitDelayUsec = std::min<uint64_t>(
-                    60000, 25000 + static_cast<uint64_t>(bsCount) * 2000);
-            }
-            state.injectingUntilUsec =
-                nowUsec + std::min<uint64_t>(250000, commitDelayUsec + 80000);
-            scheduleCommitAfterBackspace(commitDelayUsec);
-            return;
-        }
-
-        // Commit after a brief delay so deletion is processed first.
-        state.injectingUntilUsec = nowUsec + 50000;
-        scheduleCommitAfterBackspace(15000); // 15ms
-    };
-
-    auto scheduleRewrite = [this, icRef, lifetimeWeak, adapterShared, debug, loop, &state](
-                               uint64_t delayUsec,
-                                             const char *reason) {
-        if (state.rawBuffer.empty()) {
-            return;
-        }
-        state.rewriteTimer.reset();
-        const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
-        state.rewriteTimer = loop->addTimeEvent(
-            CLOCK_MONOTONIC, deadline, 0,
-            [this, icRef, lifetimeWeak, adapterShared, debug, loop, reason](fcitx::EventSourceTime *, uint64_t) {
-                if (lifetimeWeak.expired() || !adapterShared) {
-                    return false;
-                }
-                auto *ic2 = icRef.get();
-                if (!ic2) {
-                    return false;
-                }
-                auto *statePtr = stateFor(ic2);
-                if (!statePtr) {
-                    return false;
-                }
-                // Keep the EventSourceTime alive until callback returns.
-                auto _timer = std::move(statePtr->rewriteTimer);
-                if (statePtr->rewriteLock) {
-                    return false;
-                }
-                // beginRewrite is local; replicate minimal call here.
-                adapterShared->setCodeTable(statePtr->codeTable);
-                const std::string converted =
-                    adapterShared->convertRawBuffer(statePtr->rawBuffer);
-                if (converted.empty() || converted == statePtr->shownText) {
-                    return false;
-                }
-                if (debug) {
-                    FCITX_INFO() << "openkey: bs-rewrite timer program="
-                                 << statePtr->program << " reason=" << reason
-                                 << " rawBuffer=" << statePtr->rawBuffer
-                                 << " shownText=" << statePtr->shownText
-                                 << " converted=" << converted;
-                }
-                statePtr->rewriteLock = true;
-                statePtr->isInjecting = true;
-                const uint64_t now2 = fcitx::now(CLOCK_MONOTONIC);
-                statePtr->pendingConvertedText = converted;
-                const int bsCount =
-                    static_cast<int>(fcitx::utf8::length(statePtr->shownText));
-                uint64_t commitDelayUsec = 15000;
-                if (bsCount > 0) {
-                    const auto method =
-                        g_backspaceInjector.sendBackspaces(ic2, bsCount, debug);
-                    if (method == BackspaceInjector::Method::DeleteSurroundingText ||
-                        method == BackspaceInjector::Method::ForwardKey) {
-                        commitDelayUsec = 45000;
-                    } else if (method == BackspaceInjector::Method::Uinput) {
-                        commitDelayUsec = std::min<uint64_t>(
-                            60000,
-                            25000 + static_cast<uint64_t>(bsCount) * 2000);
-                    }
-                }
-                statePtr->injectingUntilUsec =
-                    now2 + std::min<uint64_t>(250000, commitDelayUsec + 80000);
-                // Commit after a brief delay.
-                statePtr->commitTimer.reset();
-                OpenKeyState *st2 = statePtr;
-                const uint64_t commitDeadline =
-                    fcitx::now(CLOCK_MONOTONIC) + commitDelayUsec;
-                // Use global event loop pointer; do not dereference `this`
-                // after engine is unloaded.
-                st2->commitTimer = loop->addTimeEvent(
-                    CLOCK_MONOTONIC, commitDeadline, 0,
-                    [this, icRef, lifetimeWeak, st2](fcitx::EventSourceTime *, uint64_t) {
-                        if (lifetimeWeak.expired()) {
-                            return false;
-                        }
-                        auto *ic3 = icRef.get();
-                        if (!ic3 || !st2) {
-                            return false;
-                        }
-                        // Keep the EventSourceTime alive until callback returns.
-                        auto _timer = std::move(st2->commitTimer);
-                        const std::string conv = st2->pendingConvertedText;
-                        st2->pendingConvertedText.clear();
-                        if (!conv.empty()) {
-                            ic3->commitString(conv);
-                            st2->shownText = conv;
-                            st2->hasRewrittenCurrentWord = true;
-                        }
-                        st2->isInjecting = false;
-                        st2->injectingUntilUsec = 0;
-                        st2->rewriteLock = false;
-                        // Drain any keys collected during lock.
-                        auto keys = std::move(st2->pendingKeys);
-                        st2->pendingKeys.clear();
-                        for (const auto &k : keys) {
-                            fcitx::KeyEvent syn(ic3, k, false, 0);
-                            handleBackspaceRewrite(ic3, syn, *st2);
-                        }
-                        return false;
-                    });
-                st2->commitTimer->setOneShot();
-                return false;
-            });
-        state.rewriteTimer->setOneShot();
-
-        if (debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-rewrite schedule program=" << state.program
-                         << " reason=" << reason << " delayUsec=" << delayUsec
-                         << " rawBuffer=" << state.rawBuffer
-                         << " shownText=" << state.shownText;
-        }
-    };
-
-    // If we are currently rewriting, queue and swallow all physical keys.
-    if (state.rewriteLock) {
-        state.pendingKeys.push_back(key);
-        event.filterAndAccept();
-        return true;
-    }
-
-    // Cursor move / delete: end composing state.
-    if (key.isCursorMove() || key.check(FcitxKey_Delete)) {
-        clearWordState();
-        return false;
-    }
-
-    // Physical BackSpace: delete one visible rune and resync rawBuffer.
-    if (key.check(FcitxKey_BackSpace)) {
-        if (state.rawBuffer.empty() && state.shownText.empty()) {
-            return false;
-        }
-        event.filterAndAccept();
-
-        g_backspaceInjector.sendBackspaces(ic, 1, debugEnabled());
-        if (!state.shownText.empty()) {
-            state.shownText = utf8DropLastN(state.shownText, 1);
-        }
-
-        if (!state.rawBuffer.empty()) {
-            state.rawBuffer.pop_back();
-        }
-        // Best-effort: trim rawBuffer until conversion matches shownText.
-        for (int i = 0; i < 16 && !state.rawBuffer.empty(); i++) {
-            adapter_->setCodeTable(state.codeTable);
-            const std::string converted =
-                adapter_->convertRawBuffer(state.rawBuffer);
-            if (converted == state.shownText) {
-                break;
-            }
-            state.rawBuffer.pop_back();
-        }
-
-        if (state.rawBuffer.empty()) {
-            state.hasRewrittenCurrentWord = false;
-        }
-        return true;
-    }
-
-    // Printable ASCII path.
-    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-    if (uni >= 0x20 && uni <= 0x7E) {
-        const char c = static_cast<char>(uni);
-
-        // Boundary keys: rewrite immediately (if needed), then forward the
-        // original boundary key and clear word state.
-        if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
-            key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
-            key.check(FcitxKey_Tab)) {
-            if (!state.rawBuffer.empty()) {
-                event.filterAndAccept();
-                // Stash boundary key and rewrite immediately.
-                state.hasPendingBoundaryKey = true;
-                state.pendingBoundaryKey = event.rawKey();
-                beginRewrite("boundary");
-                // If rewrite didn't happen, still forward boundary and clear.
-                if (!state.rewriteLock) {
-                    applyBoundaryKey(ic, event.rawKey());
-                    clearWordState();
-                }
-                return true;
-            }
-            return false;
-        }
-
-        // Word characters: update state and commit raw char to client.
-        if (isComposingASCII(c)) {
-            state.rawBuffer.push_back(c);
-            const std::string vis = fcitx::Key::keySymToUTF8(key.sym());
-            if (!vis.empty()) {
-                state.shownText += vis;
-            }
-            state.lastPhysicalKeyUsec = nowUsec;
-
-            event.filterAndAccept();
-            if (!vis.empty()) {
-                ic->commitString(vis);
-            }
-
-            // Schedule rewrites based on chunks and idle.
-            if (shouldTriggerRewriteOnChunk(state.rawBuffer)) {
-                scheduleRewrite(30000, "chunk"); // 30ms
-            }
-            // TODO: idle-based rewrite is not working well currently: some apps (e.g. Slack) may delay key events when we have pending timers, which causes noticeable input lag. We may want to revisit this in the future with a more robust implementation (e.g. using a separate thread and timer).
-            // } else {
-            //     scheduleRewrite(500000, "idle"); // 500ms
-            // }
-            return true;
-        }
-
-        // Other printable ASCII: treat as boundary of current word.
-        if (!state.rawBuffer.empty()) {
-            event.filterAndAccept();
-            state.hasPendingBoundaryKey = true;
-            state.pendingBoundaryKey = event.rawKey();
-            beginRewrite("other_ascii");
-            if (!state.rewriteLock) {
-                applyBoundaryKey(ic, event.rawKey());
-                clearWordState();
-            }
-            return true;
-        }
-        return false;
-    }
-
-    // Any other key: end composing state, let application handle.
-    clearWordState();
     return false;
 }
 
@@ -2029,19 +1698,59 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
 
     const auto key = event.key().normalize();
 
-    // Switch composition mode hotkey (Auto -> ST -> Preedit -> Backspace -> Direct -> Auto).
-    if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
-        auto clearComposingState = [this, ic, state]() {
-            state->rawBuffer.clear();
+    // Hard force: X11 browser text fields are fragile with non-preedit modes.
+    // Even if user sets ForceBackspaceRewriteDelta, keep preedit for browsers.
+    if (isX11Backend(ic) && isBrowserProgram(state->program)) {
+        const RuntimeMode desired =
+            ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)
+                ? RuntimeMode::DirectCommit
+                : RuntimeMode::Preedit;
+        if (!state->modeDecided || !state->manualMode || state->mode != desired) {
             state->shownText.clear();
             state->hasRewrittenCurrentWord = false;
             state->rewriteLock = false;
-            state->isInjecting = false;
-            state->injectingUntilUsec = 0;
+            state->waitingBackspaceAck = false;
+            state->expectedBackspaces = 0;
+            state->seenBackspaces = 0;
             state->pendingKeys.clear();
             state->rewriteTimer.reset();
             state->commitTimer.reset();
             state->pendingConvertedText.clear();
+            state->pendingShownTextAfterCommit.clear();
+            state->hasPendingBoundaryKey = false;
+            state->composing.clear();
+            state->macroBuffer.clear();
+            state->rollbackWord.clear();
+            state->rollbackDisplay.clear();
+            state->noSeedNextWord = false;
+            state->surroundingFailures = 0;
+            state->manualMode = true;
+            state->modeDecided = true;
+            state->mode = desired;
+            state->autoMode = desired;
+            updatePreeditUI(ic, *state);
+            if (debugEnabled()) {
+                FCITX_INFO() << "openkey: force preedit for x11 browser program="
+                             << state->program
+                             << " mode=" << static_cast<int>(state->mode);
+            }
+        }
+    }
+
+    // Switch composition mode hotkey (Auto -> ST -> Backspace -> Preedit -> Direct -> Auto).
+        if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
+            auto clearComposingState = [this, ic, state]() {
+            state->shownText.clear();
+            state->hasRewrittenCurrentWord = false;
+            state->rewriteLock = false;
+            state->waitingBackspaceAck = false;
+            state->expectedBackspaces = 0;
+            state->seenBackspaces = 0;
+            state->pendingKeys.clear();
+            state->rewriteTimer.reset();
+            state->commitTimer.reset();
+            state->pendingConvertedText.clear();
+            state->pendingShownTextAfterCommit.clear();
             state->hasPendingBoundaryKey = false;
             state->composing.clear();
             state->macroBuffer.clear();
@@ -2052,9 +1761,32 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             updatePreeditUI(ic, *state);
         };
 
+        // X11 browsers: always stay in preedit mode (disable other runtime
+        // mode options).
+        if (isX11Backend(ic) && isBrowserProgram(state->program)) {
+            state->manualMode = true;
+            state->modeDecided = true;
+            if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
+                state->mode = RuntimeMode::DirectCommit;
+                state->autoMode = RuntimeMode::DirectCommit;
+            } else {
+                state->mode = RuntimeMode::Preedit;
+                state->autoMode = RuntimeMode::Preedit;
+            }
+            if (debugEnabled()) {
+                FCITX_INFO() << "openkey: force mode for x11 browser program="
+                             << state->program
+                             << " mode=" << static_cast<int>(state->mode);
+            }
+            clearComposingState();
+            if (instance_) {
+                instance_->showInputMethodInformation(ic);
+            }
+            // Continue with the existing toast code path below.
+        }
         // Wine/Proton clients: always stay in preedit mode (disable other
         // runtime mode options).
-        if (isWineProgram(state->program)) {
+        else if (isWineProgram(state->program)) {
             state->manualMode = true;
             state->modeDecided = true;
             // Keep password fields safe: never attempt composition there.
@@ -2108,13 +1840,20 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         if (!state->manualMode) {
             // Enter manual mode.
             state->manualMode = true;
-            state->mode = canUseSurroundingText() ? RuntimeMode::SurroundingText
-                                                  : RuntimeMode::Preedit;
+            if (canUseSurroundingText()) {
+                state->mode = RuntimeMode::SurroundingText;
+            } else if (g_backspaceInjector.uinputAvailable(debugEnabled())) {
+                state->mode = RuntimeMode::BackspaceRewriteDelta;
+            } else {
+                state->mode = RuntimeMode::Preedit;
+            }
         } else if (state->mode == RuntimeMode::SurroundingText) {
+            state->mode = g_backspaceInjector.uinputAvailable(debugEnabled())
+                              ? RuntimeMode::BackspaceRewriteDelta
+                              : RuntimeMode::Preedit;
+        } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
             state->mode = RuntimeMode::Preedit;
         } else if (state->mode == RuntimeMode::Preedit) {
-            state->mode = RuntimeMode::BackspaceRewrite;
-        } else if (state->mode == RuntimeMode::BackspaceRewrite) {
             state->mode = RuntimeMode::DirectCommit;
         } else if (state->mode == RuntimeMode::DirectCommit) {
             // Leave manual mode and go back to auto decision.
@@ -2159,7 +1898,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                     return "Surrounding";
                 case RuntimeMode::Preedit:
                     return "Preedit";
-                case RuntimeMode::BackspaceRewrite:
+                case RuntimeMode::BackspaceRewriteDelta:
                     return "Backspace";
                 case RuntimeMode::DirectCommit:
                     return "Direct";
@@ -2240,7 +1979,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     switch (state->mode) {
     case RuntimeMode::DirectCommit:
         return;
-    case RuntimeMode::BackspaceRewrite:
+    case RuntimeMode::BackspaceRewriteDelta:
         if (backspaceRewriteHandler_) {
             handled = backspaceRewriteHandler_->handleKey(ic, event, *state);
         }
