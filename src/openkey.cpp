@@ -29,6 +29,7 @@
 #include <fcitx-utils/utf8.h>
 #include <fcitx-utils/standardpath.h>
 #include <fcitx-utils/trackableobject.h>
+#include <fcitx-utils/dbus/bus.h>
 
 #include "Macro.h"
 #include "openkey_adapter.h"
@@ -197,26 +198,6 @@ static bool equalsASCIIInsensitive(const std::string &a, const char *b) {
     return true;
 }
 
-static bool isWineProgram(const std::string &program) {
-    // if (program.empty()) {
-    //     return false;
-    // }
-    // // Wine/Proton Windows programs often show up as "*.exe" here.
-    // if (endsWithASCIIInsensitive(program, ".exe")) {
-    //     return true;
-    // }
-    // // Some toolkits report the wine loader instead of the actual exe.
-    // static const char *kWineProgramNames[] = {
-    //     "wine", "wine64", "wine-preloader", "wine64-preloader", "wineserver",
-    // };
-    // for (const char *name : kWineProgramNames) {
-    //     if (equalsASCIIInsensitive(program, name)) {
-    //         return true;
-    //     }
-    // }
-    return false;
-}
-
 static std::string asciiLower(std::string s) {
     for (char &c : s) {
         c = toLowerASCII(c);
@@ -267,7 +248,8 @@ static bool isBrowserProgram(const std::string &program) {
         "otter",
         "dooble",
         "messenger",
-        "helium"
+        "helium",
+        "window:", // common prefix in Wayland for webview-based clients
     };
 
     for (const auto &pattern : kBrowserPatterns) {
@@ -275,6 +257,52 @@ static bool isBrowserProgram(const std::string &program) {
         return true;
     }
 }
+
+    return false;
+}
+
+static bool isElectronLikeProgram(const std::string &program) {
+    if (program.empty()) {
+        return false;
+    }
+
+    const std::string base = asciiLower(programBaseName(program));
+
+    // Common executable names.
+    if (base == "electron" || base == "code" || base == "code-oss" ||
+        base == "codium" || base == "vscode") {
+        return true;
+    }
+
+    // Common desktop ids / app ids.
+    //
+    // Keep this list conservative: we only use it to avoid
+    // deleteSurroundingText in web/electron-like text fields where it can be
+    // ignored, causing duplicated commits in BackspaceRewriteDelta mode.
+    static const std::vector<std::string> kElectronPatterns = {
+        "visualstudio.code",
+        "vscodium",
+        "slack",
+        "discord",
+        "teams",
+        "notion",
+        "obsidian",
+        "postman",
+        "insomnia",
+        "mattermost",
+        "signal",
+        "element",
+        "skypeforlinux",
+        "zalo",
+        "youtube",
+        "outlook",
+    };
+
+    for (const auto &pattern : kElectronPatterns) {
+        if (base.find(pattern) != std::string::npos) {
+            return true;
+        }
+    }
 
     return false;
 }
@@ -325,16 +353,21 @@ static bool isWaylandBackend(fcitx::InputContext *ic) {
 }
 
 
-static bool shouldUseDST(fcitx::InputContext *ic, int count) {
+static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
+                         int count) {
     if (!ic) return false;
 
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return false;
+    }
+
     // Rule 1: app bị skip thủ công
-    if (isBrowserProgram(ic->program())) return false;
+    if (isBrowserProgram(program) || isElectronLikeProgram(program)) return false;
 
     // If we can't identify the program (common on Wayland for some clients),
     // deleteSurroundingText is often unreliable in web/electron text fields.
     // Prefer uinput/server backspace in that case.
-    if (ic->program().empty()) return false;
+    if (program.empty()) return false;
 
     const auto &st = ic->surroundingText();
 
@@ -360,15 +393,15 @@ public:
         None,
     };
 
-    Method sendBackspaces(fcitx::InputContext *ic, int count, bool debug,
+    Method sendBackspaces(fcitx::InputContext *ic, const std::string &program,
+                          int count, bool debug,
                           uint64_t uinputInterKeyUsec = 1500) {
-        (void)ic;
         if (count <= 0) {
             return Method::None;
         }
-             
-            // Dùng deleteSurroundingText cho app reliable, trừ Chrome
-        if (shouldUseDST(ic, count)) {
+
+        // Dùng deleteSurroundingText cho app reliable (non-browser/electron).
+        if (shouldUseDST(ic, program, count)) {
             ic->deleteSurroundingText(-count, count);
             return Method::DeleteSurroundingText;
         }
@@ -553,6 +586,71 @@ static bool isMacroTriggerKey(char c) {
 } // namespace
 
 namespace {
+constexpr const char *kBridgeBusName = "org.openkey.Bridge";
+constexpr const char *kBridgeObjectPath = "/org/openkey/Bridge";
+constexpr const char *kBridgeInterface = "org.openkey.Bridge1";
+} // namespace
+
+class FocusedAppBridge {
+public:
+    FocusedAppBridge(fcitx::EventLoop *loop,
+                     std::function<bool()> debugEnabled)
+        : bus_(fcitx::dbus::BusType::Session),
+          debugEnabled_(std::move(debugEnabled)) {
+        if (bus_.isOpen() && loop) {
+            bus_.attachEventLoop(loop);
+        }
+    }
+
+    ~FocusedAppBridge() {
+        if (bus_.isOpen()) {
+            bus_.detachEventLoop();
+        }
+    }
+
+    // Returns GNOME Shell focused app id (usually "*.desktop"), or empty.
+    std::string focusedAppId() { return queryIfNeeded().first; }
+
+    // Returns GNOME Shell focused app name, or empty.
+    std::string focusedAppName() { return queryIfNeeded().second; }
+
+private:
+    std::pair<std::string, std::string> queryIfNeeded() {
+        if (!bus_.isOpen()) {
+            return {cachedAppId_, cachedAppName_};
+        }
+        const uint64_t nowUsec = fcitx::now(CLOCK_MONOTONIC);
+        // Throttle queries to avoid per-key roundtrips when program is empty.
+        if (lastQueryUsec_ != 0 && nowUsec - lastQueryUsec_ < 1000000) {
+            return {cachedAppId_, cachedAppName_};
+        }
+        lastQueryUsec_ = nowUsec;
+
+        auto msg = bus_.createMethodCall(kBridgeBusName, kBridgeObjectPath,
+                                         kBridgeInterface, "GetFocusedApp");
+        auto reply = msg.call(20000); // 20ms
+        if (!reply || reply.isError()) {
+            if (debugEnabled_ && debugEnabled_()) {
+                FCITX_INFO() << "openkey: bridge GetFocusedApp unavailable";
+            }
+            return {cachedAppId_, cachedAppName_};
+        }
+        std::string appId;
+        std::string appName;
+        reply >> appId >> appName;
+        cachedAppId_ = std::move(appId);
+        cachedAppName_ = std::move(appName);
+        return {cachedAppId_, cachedAppName_};
+    }
+
+    fcitx::dbus::Bus bus_;
+    std::function<bool()> debugEnabled_;
+    uint64_t lastQueryUsec_ = 0;
+    std::string cachedAppId_;
+    std::string cachedAppName_;
+};
+
+namespace {
 
 struct ModeDeps {
     fcitx::Instance *instance = nullptr;
@@ -734,7 +832,8 @@ auto applyWordDelta = [&, this](const std::string &newWord,
 
     // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
     const auto method = deps_.backspaceInjector->sendBackspaces(
-        ic, static_cast<int>(deleteCount), debug, uinputInterKeyUsec);
+        ic, state.program, static_cast<int>(deleteCount), debug,
+        uinputInterKeyUsec);
 
     if (method == BackspaceInjector::Method::DeleteSurroundingText) {
         // Không cần chờ ack, commit ngay
@@ -751,7 +850,7 @@ auto applyWordDelta = [&, this](const std::string &newWord,
         // Inject thêm 1 backspace extra làm trigger ack
         // (N backspace xóa text + 1 backspace loop back báo xong)
         deps_.backspaceInjector->sendBackspaces(
-            ic, 1, debug, uinputInterKeyUsec);
+            ic, state.program, 1, debug, uinputInterKeyUsec);
 
         state.rewriteLock = true;
         state.waitingBackspaceAck = true;
@@ -816,7 +915,7 @@ auto applyWordDelta = [&, this](const std::string &newWord,
                 return false;
             }
             const auto method = deps_.backspaceInjector->sendBackspaces(
-                ic, 1, debug, uinputInterKeyUsec);
+                ic, state.program, 1, debug, uinputInterKeyUsec);
             if (method != BackspaceInjector::Method::Uinput) {
                 clearWordState();
                 return false;
@@ -875,6 +974,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     : instance_(instance), adapter_(std::make_shared<OpenKeyAdapter>()) {
     lifetime_ = std::make_shared<int>(1);
     instance_->inputContextManager().registerProperty("openkeyState", &factory_);
+    focusedAppBridge_ = std::make_unique<FocusedAppBridge>(
+        instance_ ? &instance_->eventLoop() : nullptr,
+        [this]() { return debugEnabled(); });
     ModeDeps deps;
     deps.instance = instance_;
     deps.factory = &factory_;
@@ -903,6 +1005,7 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
 }
 
 OpenKeyEngine::~OpenKeyEngine() {
+    focusedAppBridge_.reset();
     adapter_.reset();
     lifetime_.reset();
 }
@@ -1066,6 +1169,15 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     state->manualMode = false;
     state->modeDecided = false;
     state->program = ic->program();
+    if (state->program.empty() && focusedAppBridge_) {
+        const std::string bridged = focusedAppBridge_->focusedAppId();
+        if (!bridged.empty()) {
+            state->program = bridged;
+            if (debugEnabled()) {
+                FCITX_INFO() << "openkey: bridge program=" << state->program;
+            }
+        }
+    }
 
     state->codeTable = toOpenKeyCodeTable(config_.codeTable.value());
 
@@ -1106,9 +1218,10 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
         return RuntimeMode::DirectCommit;
     }
 
-    // X11 browser fields (omnibox/search boxes) are often fragile with
-    // surrounding-text/backspace rewrite. Force preedit for better UX.
-    if (isX11Backend(ic) && isBrowserProgram(s.program)) {
+    // Browsers are often fragile with surrounding-text/backspace rewrite.
+    // Force preedit for better UX.
+    if ((isX11Backend(ic) || isWaylandBackend(ic)) &&
+        isBrowserProgram(s.program)) {
         return RuntimeMode::Preedit;
     }
 
@@ -1117,12 +1230,6 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
     // modes are often fragile. Treat program-less Wayland clients as "browser
     // like" and force preedit.
     if (isWaylandBackend(ic) && s.program.empty()) {
-        return RuntimeMode::Preedit;
-    }
-
-    // Wine/Proton clients are very sensitive to surrounding-text/backspace
-    // rewriting. Force preedit unconditionally for these applications.
-    if (isWineProgram(s.program)) {
         return RuntimeMode::Preedit;
     }
 
@@ -1609,6 +1716,15 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     auto *state = stateFor(ic);
     if (state->program.empty()) {
         state->program = ic->program();
+        if (state->program.empty() && focusedAppBridge_) {
+            const std::string bridged = focusedAppBridge_->focusedAppId();
+            if (!bridged.empty()) {
+                state->program = bridged;
+                if (debugEnabled()) {
+                    FCITX_INFO() << "openkey: bridge program=" << state->program;
+                }
+            }
+        }
     }
 
     if (event.isRelease()) {
@@ -1620,7 +1736,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     // Hard force: browser-like text fields are fragile with non-preedit modes.
     // Even if user sets ForceBackspaceRewriteDelta, keep preedit.
     const bool forcePreeditForBrowserLike =
-        (isX11Backend(ic) && isBrowserProgram(state->program)) ||
+        ((isX11Backend(ic) || isWaylandBackend(ic)) &&
+         isBrowserProgram(state->program)) ||
+        // If we still can't identify the program on Wayland (bridge disabled /
+        // unavailable), treat it as browser-like for safety.
         (isWaylandBackend(ic) && state->program.empty());
     if (forcePreeditForBrowserLike) {
         const RuntimeMode desired =
@@ -1697,30 +1816,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             }
             if (debugEnabled()) {
                 FCITX_INFO() << "openkey: force mode for x11 browser program="
-                             << state->program
-                             << " mode=" << static_cast<int>(state->mode);
-            }
-            clearComposingState();
-            if (instance_) {
-                instance_->showInputMethodInformation(ic);
-            }
-            // Continue with the existing toast code path below.
-        }
-        // Wine/Proton clients: always stay in preedit mode (disable other
-        // runtime mode options).
-        else if (isWineProgram(state->program)) {
-            state->manualMode = true;
-            state->modeDecided = true;
-            // Keep password fields safe: never attempt composition there.
-            if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
-                state->mode = RuntimeMode::DirectCommit;
-                state->autoMode = RuntimeMode::DirectCommit;
-            } else {
-                state->mode = RuntimeMode::Preedit;
-                state->autoMode = RuntimeMode::Preedit;
-            }
-            if (debugEnabled()) {
-                FCITX_INFO() << "openkey: force mode for wine program="
                              << state->program
                              << " mode=" << static_cast<int>(state->mode);
             }

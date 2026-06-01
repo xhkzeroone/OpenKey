@@ -24,6 +24,7 @@ namespace openkey {
 
 struct OpenKeyState;
 class OpenKeyAdapter;
+class FocusedAppBridge;
 
 class InputModeHandler {
 public:
@@ -269,6 +270,10 @@ private:
 
     // Core adapter.
     std::shared_ptr<OpenKeyAdapter> adapter_;
+
+    // Optional bridge to GNOME Shell extension to resolve app id/name when
+    // InputContext::program() is empty (common on Wayland for some clients).
+    std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
 
