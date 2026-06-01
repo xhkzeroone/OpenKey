@@ -609,22 +609,16 @@ public:
     }
 
     // Returns GNOME Shell focused app id (usually "*.desktop"), or empty.
-    std::string focusedAppId() { return queryIfNeeded().first; }
+    std::string focusedAppId() { return query().first; }
 
     // Returns GNOME Shell focused app name, or empty.
-    std::string focusedAppName() { return queryIfNeeded().second; }
+    std::string focusedAppName() { return query().second; }
 
 private:
-    std::pair<std::string, std::string> queryIfNeeded() {
+    std::pair<std::string, std::string> query() {
         if (!bus_.isOpen()) {
-            return {cachedAppId_, cachedAppName_};
+            return {};
         }
-        const uint64_t nowUsec = fcitx::now(CLOCK_MONOTONIC);
-        // Throttle queries to avoid per-key roundtrips when program is empty.
-        if (lastQueryUsec_ != 0 && nowUsec - lastQueryUsec_ < 1000000) {
-            return {cachedAppId_, cachedAppName_};
-        }
-        lastQueryUsec_ = nowUsec;
 
         auto msg = bus_.createMethodCall(kBridgeBusName, kBridgeObjectPath,
                                          kBridgeInterface, "GetFocusedApp");
@@ -633,21 +627,16 @@ private:
             if (debugEnabled_ && debugEnabled_()) {
                 FCITX_INFO() << "openkey: bridge GetFocusedApp unavailable";
             }
-            return {cachedAppId_, cachedAppName_};
+            return {};
         }
         std::string appId;
         std::string appName;
         reply >> appId >> appName;
-        cachedAppId_ = std::move(appId);
-        cachedAppName_ = std::move(appName);
-        return {cachedAppId_, cachedAppName_};
+        return {std::move(appId), std::move(appName)};
     }
 
     fcitx::dbus::Bus bus_;
     std::function<bool()> debugEnabled_;
-    uint64_t lastQueryUsec_ = 0;
-    std::string cachedAppId_;
-    std::string cachedAppName_;
 };
 
 namespace {
@@ -1760,22 +1749,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                              fcitx::KeyEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
-    if (state->program.empty()) {
-        state->program = ic->program();
-        if (state->program.empty() && focusedAppBridge_) {
-            const std::string bridged = focusedAppBridge_->focusedAppId();
-            if (!bridged.empty()) {
-                state->program = bridged;
-                if (debugEnabled()) {
-                    FCITX_INFO() << "openkey: bridge program=" << state->program;
-                }
-            }
-        }
-        state->preferUinputBackspace =
-            (!state->program.empty() &&
-             backspacePreferUinputApps_.find(state->program) !=
-                 backspacePreferUinputApps_.end());
-    }
 
     if (event.isRelease()) {
         return;
@@ -1786,16 +1759,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     // Toggle delete method in BackspaceRewriteDelta: prefer uinput for current app.
     if (key.checkKeyList(config_.toggleBackspaceUinputKey.value()) &&
         key.sym() != FcitxKey_None) {
-        std::string program = state->program;
-        if (program.empty()) {
-            program = ic->program();
-        }
-        if (program.empty() && focusedAppBridge_) {
-            const std::string bridged = focusedAppBridge_->focusedAppId();
-            if (!bridged.empty()) {
-                program = bridged;
-            }
-        }
+        const std::string program = state->program;
 
         if (!program.empty()) {
             toggleProgramPreferUinput(program);
