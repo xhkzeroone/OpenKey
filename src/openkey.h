@@ -178,6 +178,7 @@ enum class RuntimeMode {
 struct OpenKeyState : public fcitx::InputContextProperty {
     // Backspace-rewrite mode state.
     std::string shownText;
+    // True once the current word has been rewritten by OpenKey.
     bool hasRewrittenCurrentWord = false;
     bool rewriteLock = false;
     bool waitingBackspaceAck = false;

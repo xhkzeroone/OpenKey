@@ -49,6 +49,8 @@ int main() {
     expectEq("aa", typeSequence(adapter, "aa"), u8"â");
     expectEq("dd", typeSequence(adapter, "dd"), u8"đ");
     expectEq("uw", typeSequence(adapter, "uw"), u8"ư");
+    expectEq("suw", typeSequence(adapter, "suw"), u8"sư");
+    expectEq("sww", typeSequence(adapter, "sww"), "sw");
     expectEq("ww", typeSequence(adapter, "ww"), "w");
     // OpenKey core follows standard Telex:
     // - đ = dd

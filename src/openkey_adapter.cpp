@@ -304,14 +304,22 @@ OpenKeyProcessResult OpenKeyAdapter::processAsciiKey(const std::string &currentW
     }
 
     // UniKey-like usability quirk:
-    // OpenKey core treats standalone 'w' as ư, but the second 'w' restores to
-    // "uw". For typical Telex expectations, allow "ww" to yield "w".
-    if (vInputType == vTelex &&
-        (asciiChar == 'w' || asciiChar == 'W') &&
-        (currentWord == u8"ư" || currentWord == u8"Ư")) {
-        result.handled = true;
-        result.newWord = std::string(1, asciiChar);
-        return result;
+    // OpenKey core restores a trailing "ư" back to "uw" when the user types
+    // another `w`. For typical Telex expectations, collapse that repeat `w`
+    // into a plain `w` at the tail of the current word.
+    if (vInputType == vTelex && (asciiChar == 'w' || asciiChar == 'W') &&
+        fcitx::utf8::validate(currentWord)) {
+        const auto len = fcitx::utf8::length(currentWord);
+        if (len > 0) {
+            auto it = fcitx::utf8::nextNChar(currentWord.begin(), len - 1);
+            const std::string lastChar(it, currentWord.end());
+            if (lastChar == u8"ư" || lastChar == u8"Ư") {
+                result.handled = true;
+                result.newWord = utf8DropLastN(currentWord, 1);
+                result.newWord += asciiChar;
+                return result;
+            }
+        }
     }
 
     const auto internalWord = encodeWordToInternal(currentWord);

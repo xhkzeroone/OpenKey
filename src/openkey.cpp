@@ -772,9 +772,43 @@ public:
             }
         };
 
+        auto finishPendingBackspaceCommit =
+            [this, icRef, lifetimeWeak, stateFor, drainPendingKeys]() {
+                if (lifetimeWeak.expired()) {
+                    return;
+                }
+                auto *ic2 = icRef.get();
+                if (!ic2) {
+                    return;
+                }
+                auto *st = stateFor(ic2);
+                if (!st) {
+                    return;
+                }
+
+                const std::string commitText =
+                    std::move(st->pendingConvertedText);
+                const std::string shownAfter =
+                    std::move(st->pendingShownTextAfterCommit);
+                st->commitTimer.reset();
+                st->pendingConvertedText.clear();
+                st->pendingShownTextAfterCommit.clear();
+
+                if (!commitText.empty()) {
+                    ic2->commitString(commitText);
+                }
+                st->shownText = shownAfter;
+                st->rewriteLock = false;
+                st->waitingBackspaceAck = false;
+                st->expectedBackspaces = 0;
+                st->seenBackspaces = 0;
+
+                drainPendingKeys();
+            };
+
         auto scheduleCommitAfterBackspace =
             [this, icRef, lifetimeWeak, loop, stateFor, &state,
-             drainPendingKeys](uint64_t delayUsec) {
+             finishPendingBackspaceCommit](uint64_t delayUsec) {
                 state.commitTimer.reset();
                 if (!loop) {
                     return;
@@ -784,7 +818,8 @@ public:
                 state.commitTimer = loop->addTimeEvent(
                     CLOCK_MONOTONIC, deadline, 0,
                     [this, icRef, lifetimeWeak, stateFor,
-                     drainPendingKeys](fcitx::EventSourceTime *, uint64_t) {
+                     finishPendingBackspaceCommit](fcitx::EventSourceTime *,
+                                                   uint64_t) {
                         if (lifetimeWeak.expired()) {
                             return false;
                         }
@@ -797,25 +832,7 @@ public:
                             return false;
                         }
                         auto _timer = std::move(st->commitTimer);
-
-                        const std::string commitText =
-                            std::move(st->pendingConvertedText);
-                        const std::string shownAfter =
-                            std::move(st->pendingShownTextAfterCommit);
-                        st->pendingConvertedText.clear();
-                        st->pendingShownTextAfterCommit.clear();
-
-                        if (!commitText.empty()) {
-                            ic2->commitString(commitText);
-                        }
-                        st->shownText = shownAfter;
-                        st->hasRewrittenCurrentWord = !st->shownText.empty();
-                        st->rewriteLock = false;
-                        st->waitingBackspaceAck = false;
-                        st->expectedBackspaces = 0;
-                        st->seenBackspaces = 0;
-
-                        drainPendingKeys();
+                        finishPendingBackspaceCommit();
                         return false;
                     });
                 if (state.commitTimer) {
@@ -824,6 +841,7 @@ public:
             };
 
 	auto applyWordDelta = [&, this](const std::string &newWord,
+	                                char asciiChar,
 	                                const char *reason) -> bool {
 	    if (!deps_.backspaceInjector) {
 	        return false;
@@ -833,6 +851,9 @@ public:
         clearWordState();
         return false;
     }
+
+    const std::string oldShown = state.shownText;
+    const std::string rawAppend = oldShown + asciiChar;
 
     const std::size_t prefixLen =
         commonPrefixBytesUTF8Boundary(state.shownText, newWord);
@@ -858,7 +879,8 @@ public:
             ic->commitString(commitText);
         }
         state.shownText = newWord;
-        state.hasRewrittenCurrentWord = !state.shownText.empty();
+        state.hasRewrittenCurrentWord =
+            state.hasRewrittenCurrentWord || (newWord != rawAppend);
         event.filterAndAccept();
         return true;
 	    }
@@ -875,7 +897,8 @@ const std::string programForInjector = state.program;
             ic->commitString(commitText);
         }
         state.shownText = newWord;
-        state.hasRewrittenCurrentWord = !state.shownText.empty();
+        state.hasRewrittenCurrentWord =
+            state.hasRewrittenCurrentWord || (newWord != rawAppend);
         event.filterAndAccept();
         return true;
     }
@@ -901,6 +924,14 @@ const std::string programForInjector = state.program;
     return false;
 };
         if (state.waitingBackspaceAck) {
+            if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
+                key.check(FcitxKey_ISO_Enter) || key.isCursorMove() ||
+                key.check(FcitxKey_Delete) || key.check(FcitxKey_Tab) ||
+                key.check(FcitxKey_Escape)) {
+                finishPendingBackspaceCommit();
+                state.pendingKeys.clear();
+                return false;
+            }
             if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
                 state.seenBackspaces++;
                 if (state.seenBackspaces < state.expectedBackspaces) {
@@ -948,6 +979,10 @@ const std::string programForInjector = state.program;
             if (state.shownText.empty()) {
                 return false;
             }
+            if (!state.hasRewrittenCurrentWord) {
+                clearWordState();
+                return false;
+            }
             const std::string programForInjector = state.program;
             const auto method = deps_.backspaceInjector->sendBackspaces(
                 ic, programForInjector, 1, debug, uinputInterKeyUsec);
@@ -957,7 +992,6 @@ const std::string programForInjector = state.program;
             }
             event.filterAndAccept();
             state.shownText = utf8DropLastN(state.shownText, 1);
-            state.hasRewrittenCurrentWord = !state.shownText.empty();
             return true;
         }
 
@@ -979,14 +1013,14 @@ const std::string programForInjector = state.program;
 	            if (!adapterShared) {
 	                return false;
 	            }
-                    adapterShared->setCodeTable(state.codeTable);
+                adapterShared->setCodeTable(state.codeTable);
 	            const auto r =
 	                adapterShared->processAsciiKey(state.shownText, c);
 	            if (!r.handled) {
 	                return false;
 	            }
                 state.lastPhysicalKeyUsec = nowUsec;
-                return applyWordDelta(r.newWord, "ascii");
+                return applyWordDelta(r.newWord, c, "ascii");
             }
 
             // Other printable ASCII: treat as boundary of current word.
