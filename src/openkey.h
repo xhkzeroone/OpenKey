@@ -34,18 +34,6 @@ public:
     virtual void reset(OpenKeyState &) {}
 };
 
-enum class ModeOverride {
-    Auto,
-    ForceBackspaceRewriteDelta,
-    ForceSurroundingText,
-    ForcePreedit,
-    DirectCommit,
-};
-FCITX_CONFIG_ENUM_NAME_WITH_I18N(ModeOverride, N_("Auto"),
-                                 N_("Force Backspace Rewrite"),
-                                 N_("Force Surrounding Text"),
-                                 N_("Force Preedit"), N_("Direct Commit"));
-
 enum class InputType { Telex, VNI, SimpleTelex1, SimpleTelex2 };
 FCITX_CONFIG_ENUM_NAME_WITH_I18N(InputType, N_("Telex"), N_("VNI"),
                                  N_("Simple Telex 1"), N_("Simple Telex 2"));
@@ -60,24 +48,10 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                         switchModeKey{this,
                                       "SwitchModeKey",
                                       N_("Switch composition mode hotkey"),
-                                      {fcitx::Key("Alt+Super+space")},
+                                      {fcitx::Key("Alt+space")},
                                       fcitx::KeyListConstrain(
                                           fcitx::KeyConstrainFlag::
                                               AllowModifierLess)};
-                    fcitx::KeyListOption
-                        toggleBackspaceUinputKey{this,
-                                                 "ToggleBackspaceUinputKey",
-                                                 N_("Toggle uinput backspace for current app"),
-                                                 {fcitx::Key("Alt+Super+BackSpace")},
-                                                 fcitx::KeyListConstrain(
-                                                     fcitx::KeyConstrainFlag::
-                                                         AllowModifierLess)};
-                    fcitx::OptionWithAnnotation<ModeOverride,
-                                                ModeOverrideI18NAnnotation>
-                        mode{this,
-                             "Mode",
-                             N_("Composition Mode"),
-                             ModeOverride::Auto};
                     fcitx::OptionWithAnnotation<InputType,
                                                 InputTypeI18NAnnotation>
                         inputType{this,
@@ -191,20 +165,10 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                         debug{this,
                               "Debug",
                               N_("Debug Logging"),
-                              false};
-                    fcitx::Option<std::string>
-                        backspacePreferUinputApps{this,
-                                                  "BackspacePreferUinputApps",
-                                                  N_("Prefer uinput backspace for apps"),
-                                                  ""};
-                    fcitx::Option<std::string>
-                        surroundingTextBlacklist{this,
-                                                 "SurroundingTextBlacklist",
-                                                 N_("Surrounding Text "
-                                                    "Blacklist"),
-                                                 ""};);
+                              false};);
 
 enum class RuntimeMode {
+    Auto,
     BackspaceRewriteDelta,
     SurroundingText,
     Preedit,
@@ -215,9 +179,6 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     // Backspace-rewrite mode state.
     std::string shownText;
     bool hasRewrittenCurrentWord = false;
-    // If true, avoid deleteSurroundingText and prefer uinput backspace injection
-    // for this input context (manual override per app).
-    bool preferUinputBackspace = false;
     bool rewriteLock = false;
     bool waitingBackspaceAck = false;
     int expectedBackspaces = 0;
@@ -279,11 +240,7 @@ private:
     std::shared_ptr<void> lifetime_;
     OpenKeyConfig config_;
 
-    std::unordered_set<std::string> surroundingBlacklist_;
-    bool blacklistDirty_ = false;
-
-    std::unordered_set<std::string> backspacePreferUinputApps_;
-    bool backspacePreferUinputDirty_ = false;
+    std::unordered_map<std::string, RuntimeMode> appModeMap_;
 
     fcitx::SimpleInputContextPropertyFactory<OpenKeyState> factory_;
 
@@ -297,16 +254,16 @@ private:
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
 
     bool debugEnabled() const;
-    void rebuildBlacklist();
-    void rebuildBackspacePreferUinputApps();
+    void loadAppModes();
+    void persistAppModes();
+    void setAppModeForProgram(const std::string &program, RuntimeMode mode);
     void applyConfig();
     void persistConfig();
-    void addProgramToBlacklist(const std::string &program);
-    void toggleProgramPreferUinput(const std::string &program);
 
     OpenKeyState *stateFor(fcitx::InputContext *ic);
 
-    RuntimeMode decideMode(fcitx::InputContext *ic, OpenKeyState &state);
+    RuntimeMode decideMode(fcitx::InputContext *ic, OpenKeyState &state,
+                             bool writeBack = true);
     bool handlePreedit(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                        OpenKeyState &state);
     bool handleSurroundingText(fcitx::InputContext *ic, fcitx::KeyEvent &event,

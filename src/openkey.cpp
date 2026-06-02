@@ -216,6 +216,50 @@ static std::string programBaseName(std::string program) {
     return program;
 }
 
+static std::string normalizedProgramName(const std::string &program) {
+    return asciiLower(programBaseName(program));
+}
+
+static std::string runtimeModeToString(RuntimeMode mode) {
+    switch (mode) {
+    case RuntimeMode::Auto:
+        return "auto";
+    case RuntimeMode::Preedit:
+        return "preedit";
+    case RuntimeMode::SurroundingText:
+        return "surrounding";
+    case RuntimeMode::BackspaceRewriteDelta:
+        return "backspace";
+    case RuntimeMode::DirectCommit:
+        return "direct";
+    }
+    return "auto";
+}
+
+static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
+    if (equalsASCIIInsensitive(mode, "auto")) {
+        out = RuntimeMode::Auto;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "preedit")) {
+        out = RuntimeMode::Preedit;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "surrounding")) {
+        out = RuntimeMode::SurroundingText;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "backspace")) {
+        out = RuntimeMode::BackspaceRewriteDelta;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "direct")) {
+        out = RuntimeMode::DirectCommit;
+        return true;
+    }
+    return false;
+}
+
 static bool isBrowserProgram(const std::string &program) {
     if (program.empty()) {
         return false;
@@ -820,8 +864,7 @@ public:
 	    }
 	
 	    // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
-	    const std::string programForInjector =
-	        state.preferUinputBackspace ? std::string() : state.program;
+const std::string programForInjector = state.program;
 	    const auto method = deps_.backspaceInjector->sendBackspaces(
 	        ic, programForInjector, static_cast<int>(deleteCount), debug,
 	        uinputInterKeyUsec);
@@ -900,21 +943,20 @@ public:
             return false;
         }
 
-	        // Physical BackSpace: delete one visible rune.
-	        if (key.check(FcitxKey_BackSpace)) {
-	            if (state.shownText.empty()) {
-	                return false;
-	            }
-	            const std::string programForInjector =
-	                state.preferUinputBackspace ? std::string() : state.program;
-	            const auto method = deps_.backspaceInjector->sendBackspaces(
-	                ic, programForInjector, 1, debug, uinputInterKeyUsec);
-	            if (method != BackspaceInjector::Method::Uinput) {
-	                clearWordState();
-	                return false;
-	            }
-	            event.filterAndAccept();
-	            state.shownText = utf8DropLastN(state.shownText, 1);
+        // Physical BackSpace: delete one visible rune.
+        if (key.check(FcitxKey_BackSpace)) {
+            if (state.shownText.empty()) {
+                return false;
+            }
+            const std::string programForInjector = state.program;
+            const auto method = deps_.backspaceInjector->sendBackspaces(
+                ic, programForInjector, 1, debug, uinputInterKeyUsec);
+            if (method != BackspaceInjector::Method::Uinput) {
+                clearWordState();
+                return false;
+            }
+            event.filterAndAccept();
+            state.shownText = utf8DropLastN(state.shownText, 1);
             state.hasRewrittenCurrentWord = !state.shownText.empty();
             return true;
         }
@@ -1023,6 +1065,8 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
 
     auto runtimeModeLabel = [&](RuntimeMode m) -> std::string {
         switch (m) {
+        case RuntimeMode::Auto:
+            return "Auto";
         case RuntimeMode::SurroundingText:
             return "Surrounding";
         case RuntimeMode::Preedit:
@@ -1050,6 +1094,8 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
         return {};
     }
     switch (state->mode) {
+    case RuntimeMode::Auto:
+        return "Auto";
     case RuntimeMode::SurroundingText:
         return "Surrounding";
     case RuntimeMode::Preedit:
@@ -1070,28 +1116,52 @@ bool OpenKeyEngine::debugEnabled() const {
     return env && env[0] && env[0] != '0';
 }
 
-void OpenKeyEngine::rebuildBlacklist() {
-    surroundingBlacklist_.clear();
-    for (auto &part : fcitx::stringutils::split(
-             config_.surroundingTextBlacklist.value(), ",",
-             fcitx::stringutils::SplitBehavior::SkipEmpty)) {
-        auto s = fcitx::stringutils::trim(part);
-        if (!s.empty()) {
-            surroundingBlacklist_.insert(std::move(s));
+
+void OpenKeyEngine::loadAppModes() {
+    appModeMap_.clear();
+    fcitx::RawConfig raw;
+    fcitx::readAsIni(raw, fcitx::StandardPath::Type::PkgConfig,
+                     "conf/openkey-appmodes.conf");
+    for (const auto &section : raw.subItems()) {
+        const auto normalized = normalizedProgramName(section);
+        if (normalized.empty()) {
+            continue;
         }
+        auto sectionConfig = raw.get(section);
+        if (!sectionConfig) {
+            continue;
+        }
+        const std::string *value = sectionConfig->valueByPath("mode");
+        if (!value) {
+            continue;
+        }
+        RuntimeMode mode;
+        if (!runtimeModeFromString(*value, mode)) {
+            continue;
+        }
+        appModeMap_[normalized] = mode;
     }
 }
 
-void OpenKeyEngine::rebuildBackspacePreferUinputApps() {
-    backspacePreferUinputApps_.clear();
-    for (auto &part : fcitx::stringutils::split(
-             config_.backspacePreferUinputApps.value(), ",",
-             fcitx::stringutils::SplitBehavior::SkipEmpty)) {
-        auto s = fcitx::stringutils::trim(part);
-        if (!s.empty()) {
-            backspacePreferUinputApps_.insert(std::move(s));
+void OpenKeyEngine::persistAppModes() {
+    fcitx::RawConfig raw;
+    for (auto &[program, mode] : appModeMap_) {
+        if (program.empty()) {
+            continue;
         }
+        raw[program]["mode"] = runtimeModeToString(mode);
     }
+    fcitx::safeSaveAsIni(raw, fcitx::StandardPath::Type::PkgConfig,
+                         "conf/openkey-appmodes.conf");
+}
+
+void OpenKeyEngine::setAppModeForProgram(const std::string &program,
+                                         RuntimeMode mode) {
+    const auto normalized = normalizedProgramName(program);
+    if (normalized.empty()) {
+        return;
+    }
+    appModeMap_[normalized] = mode;
 }
 
 OpenKeyState *OpenKeyEngine::stateFor(fcitx::InputContext *ic) {
@@ -1108,12 +1178,11 @@ void OpenKeyEngine::setConfig(const fcitx::RawConfig &config) {
 void OpenKeyEngine::reloadConfig() {
     fcitx::readAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                      "conf/openkey.conf");
+    loadAppModes();
     applyConfig();
 }
 
 void OpenKeyEngine::applyConfig() {
-    rebuildBlacklist();
-    rebuildBackspacePreferUinputApps();
     adapter_->setInputType(toOpenKeyInputType(config_.inputType.value()));
     adapter_->setFreeMark(config_.freeMark.value());
     adapter_->setCodeTable(toOpenKeyCodeTable(config_.codeTable.value()));
@@ -1143,8 +1212,6 @@ void OpenKeyEngine::applyConfig() {
 }
 
 void OpenKeyEngine::persistConfig() {
-    blacklistDirty_ = false;
-    backspacePreferUinputDirty_ = false;
     fcitx::safeSaveAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                          "conf/openkey.conf");
 }
@@ -1185,10 +1252,6 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
             }
         }
     }
-    state->preferUinputBackspace =
-        (!state->program.empty() &&
-         backspacePreferUinputApps_.find(state->program) !=
-             backspacePreferUinputApps_.end());
 
     state->codeTable = toOpenKeyCodeTable(config_.codeTable.value());
 
@@ -1223,25 +1286,31 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     updatePreeditUI(ic, *state);
 }
 
-RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) {
+RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
+                                         OpenKeyState &s,
+                                         bool writeBack) {
     // Password field should never attempt to do any composition.
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
         return RuntimeMode::DirectCommit;
     }
 
-    // Browsers are often fragile with surrounding-text/backspace rewrite.
-    // Force preedit for better UX.
-    if ((isX11Backend(ic) || isWaylandBackend(ic)) &&
-        isBrowserProgram(s.program)) {
-        return RuntimeMode::Preedit;
+    const auto normalizedProgram = normalizedProgramName(s.program);
+    auto it = appModeMap_.find(normalizedProgram);
+    if (!normalizedProgram.empty() && it != appModeMap_.end() &&
+        it->second != RuntimeMode::Auto) {
+        return it->second;
     }
 
-    // Wayland: some clients (notably browsers/electron using compositor input
-    // method protocol) may not provide program name at all, and non-preedit
-    // modes are often fragile. Treat program-less Wayland clients as "browser
-    // like" and force preedit.
-    if (isWaylandBackend(ic) && s.program.empty()) {
-        return RuntimeMode::Preedit;
+    // Browsers are often fragile with surrounding-text/backspace rewrite.
+    // Force preedit for better UX.
+    if (isBrowserProgram(s.program) ||
+        (isWaylandBackend(ic) && s.program.empty())) {
+        const auto mode = RuntimeMode::Preedit;
+        if (writeBack && !normalizedProgram.empty()) {
+            appModeMap_[normalizedProgram] = mode;
+            persistAppModes();
+        }
+        return mode;
     }
 
     const auto canUseSurroundingText = [&]() -> bool {
@@ -1250,10 +1319,6 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
             return false;
         }
         if (!st.isValid() || st.cursor() != st.anchor()) {
-            return false;
-        }
-        if (!s.program.empty() &&
-            surroundingBlacklist_.find(s.program) != surroundingBlacklist_.end()) {
             return false;
         }
         if (!fcitx::utf8::validate(st.text())) {
@@ -1265,71 +1330,21 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s) 
         return true;
     };
 
-    // Explicit overrides.
-    switch (config_.mode.value()) {
-    case ModeOverride::DirectCommit:
-        return RuntimeMode::DirectCommit;
-    case ModeOverride::ForceSurroundingText:
-        // If forced surrounding-text can't be used, fallback to backspace
-        // rewrite; otherwise fallback to preedit.
-        if (canUseSurroundingText()) {
-            return RuntimeMode::SurroundingText;
-        }
-        return RuntimeMode::BackspaceRewriteDelta;
-    case ModeOverride::ForcePreedit:
-        return RuntimeMode::Preedit;
-    case ModeOverride::ForceBackspaceRewriteDelta:
-        return RuntimeMode::BackspaceRewriteDelta;
-    case ModeOverride::Auto:
-        break;
-    }
-
-    // Auto mode: SurroundingText -> BackspaceRewrite.
     if (canUseSurroundingText()) {
-        return RuntimeMode::SurroundingText;
-    }
-    return RuntimeMode::BackspaceRewriteDelta;
-}
-
-void OpenKeyEngine::addProgramToBlacklist(const std::string &program) {
-    if (program.empty() || surroundingBlacklist_.find(program) != surroundingBlacklist_.end()) {
-        return;
-    }
-    surroundingBlacklist_.insert(program);
-
-    // Persist to config as comma-separated list.
-    std::string merged = config_.surroundingTextBlacklist.value();
-    if (!merged.empty() && merged.back() != ',') {
-        merged.push_back(',');
-    }
-    merged += program;
-    config_.surroundingTextBlacklist.setValue(std::move(merged));
-    blacklistDirty_ = true;
-    persistConfig();
-}
-
-void OpenKeyEngine::toggleProgramPreferUinput(const std::string &program) {
-    if (program.empty()) {
-        return;
+        const auto mode = RuntimeMode::SurroundingText;
+        if (writeBack && !normalizedProgram.empty()) {
+            appModeMap_[normalizedProgram] = mode;
+            persistAppModes();
+        }
+        return mode;
     }
 
-    const auto it = backspacePreferUinputApps_.find(program);
-    if (it != backspacePreferUinputApps_.end()) {
-        backspacePreferUinputApps_.erase(it);
-    } else {
-        backspacePreferUinputApps_.insert(program);
+    const auto mode = RuntimeMode::BackspaceRewriteDelta;
+    if (writeBack && !normalizedProgram.empty()) {
+        appModeMap_[normalizedProgram] = mode;
+        persistAppModes();
     }
-
-    std::vector<std::string> apps;
-    apps.reserve(backspacePreferUinputApps_.size());
-    for (const auto &s : backspacePreferUinputApps_) {
-        apps.push_back(s);
-    }
-    std::sort(apps.begin(), apps.end());
-    config_.backspacePreferUinputApps.setValue(
-        fcitx::stringutils::join(apps, ","));
-    backspacePreferUinputDirty_ = true;
-    persistConfig();
+    return mode;
 }
 
 void OpenKeyEngine::updatePreeditUI(fcitx::InputContext *ic,
@@ -1756,176 +1771,16 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
 
     const auto key = event.key().normalize();
 
-    // Toggle delete method in BackspaceRewriteDelta: prefer uinput for current app.
-    if (key.checkKeyList(config_.toggleBackspaceUinputKey.value()) &&
-        key.sym() != FcitxKey_None) {
-        const std::string program = state->program;
-
-        if (!program.empty()) {
-            toggleProgramPreferUinput(program);
-            state->program = program;
-            state->preferUinputBackspace =
-                (backspacePreferUinputApps_.find(program) !=
-                 backspacePreferUinputApps_.end());
-
-            state->shownText.clear();
-            state->hasRewrittenCurrentWord = false;
-            state->rewriteLock = false;
-            state->waitingBackspaceAck = false;
-            state->expectedBackspaces = 0;
-            state->seenBackspaces = 0;
-            state->pendingKeys.clear();
-            state->rewriteTimer.reset();
-            state->commitTimer.reset();
-            state->pendingConvertedText.clear();
-            state->pendingShownTextAfterCommit.clear();
-            state->hasPendingBoundaryKey = false;
-            state->composing.clear();
-            state->macroBuffer.clear();
-            state->rollbackWord.clear();
-            state->rollbackDisplay.clear();
-            state->noSeedNextWord = false;
-            state->surroundingFailures = 0;
-            updatePreeditUI(ic, *state);
-
-            const std::string toast =
-                std::string("OpenKey delete: ") +
-                (state->preferUinputBackspace ? "Uinput" : "DST");
-
-            fcitx::Text aux;
-            aux.append(toast);
-            ic->inputPanel().setAuxUp(aux);
-            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel,
-                                    true);
-
-            state->modeInfoTimer.reset();
-            const auto icRef = ic->watch();
-            const std::weak_ptr<void> lifetimeWeak = lifetime_;
-            const uint64_t deadline =
-                fcitx::now(CLOCK_MONOTONIC) + 800000; // 800ms
-            if (instance_) {
-                state->modeInfoTimer = instance_->eventLoop().addTimeEvent(
-                    CLOCK_MONOTONIC, deadline, 0,
-                    [this, icRef, lifetimeWeak, toast](fcitx::EventSourceTime *,
-                                                      uint64_t) {
-                        if (lifetimeWeak.expired()) {
-                            return false;
-                        }
-                        auto *ic2 = icRef.get();
-                        if (!ic2) {
-                            return false;
-                        }
-                        auto *st = stateFor(ic2);
-                        if (!st) {
-                            return false;
-                        }
-                        auto _timer = std::move(st->modeInfoTimer);
-
-                        const auto &current =
-                            ic2->inputPanel().auxUp().toString();
-                        if (current == toast) {
-                            ic2->inputPanel().setAuxUp(fcitx::Text());
-                            ic2->updateUserInterface(
-                                fcitx::UserInterfaceComponent::InputPanel, true);
-                        }
-                        return false;
-                    });
-            }
-        } else {
-            const std::string toast = "OpenKey delete: unknown app";
-            fcitx::Text aux;
-            aux.append(toast);
-            ic->inputPanel().setAuxUp(aux);
-            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel,
-                                    true);
-
-            state->modeInfoTimer.reset();
-            const auto icRef = ic->watch();
-            const std::weak_ptr<void> lifetimeWeak = lifetime_;
-            const uint64_t deadline =
-                fcitx::now(CLOCK_MONOTONIC) + 800000; // 800ms
-            if (instance_) {
-                state->modeInfoTimer = instance_->eventLoop().addTimeEvent(
-                    CLOCK_MONOTONIC, deadline, 0,
-                    [this, icRef, lifetimeWeak, toast](fcitx::EventSourceTime *,
-                                                      uint64_t) {
-                        if (lifetimeWeak.expired()) {
-                            return false;
-                        }
-                        auto *ic2 = icRef.get();
-                        if (!ic2) {
-                            return false;
-                        }
-                        auto *st = stateFor(ic2);
-                        if (!st) {
-                            return false;
-                        }
-                        auto _timer = std::move(st->modeInfoTimer);
-
-                        const auto &current =
-                            ic2->inputPanel().auxUp().toString();
-                        if (current == toast) {
-                            ic2->inputPanel().setAuxUp(fcitx::Text());
-                            ic2->updateUserInterface(
-                                fcitx::UserInterfaceComponent::InputPanel, true);
-                        }
-                        return false;
-                    });
-            }
-        }
-
-        event.filterAndAccept();
-        return;
+    // Ensure we have a baseline auto mode for this context.
+    if (!state->modeDecided) {
+        state->lastCapability = ic->capabilityFlags();
+        state->mode = decideMode(ic, *state);
+        state->autoMode = state->mode;
+        state->modeDecided = true;
     }
 
-    // Hard force: browser-like text fields are fragile with non-preedit modes.
-    // Even if user sets ForceBackspaceRewriteDelta, keep preedit.
-    const bool forcePreeditForBrowserLike =
-        ((isX11Backend(ic) || isWaylandBackend(ic)) &&
-         isBrowserProgram(state->program)) ||
-        // If we still can't identify the program on Wayland (bridge disabled /
-        // unavailable), treat it as browser-like for safety.
-        (isWaylandBackend(ic) && state->program.empty());
-    if (forcePreeditForBrowserLike) {
-        const RuntimeMode desired =
-            ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)
-                ? RuntimeMode::DirectCommit
-                : RuntimeMode::Preedit;
-        if (!state->modeDecided || !state->manualMode || state->mode != desired) {
-            state->shownText.clear();
-            state->hasRewrittenCurrentWord = false;
-            state->rewriteLock = false;
-            state->waitingBackspaceAck = false;
-            state->expectedBackspaces = 0;
-            state->seenBackspaces = 0;
-            state->pendingKeys.clear();
-            state->rewriteTimer.reset();
-            state->commitTimer.reset();
-            state->pendingConvertedText.clear();
-            state->pendingShownTextAfterCommit.clear();
-            state->hasPendingBoundaryKey = false;
-            state->composing.clear();
-            state->macroBuffer.clear();
-            state->rollbackWord.clear();
-            state->rollbackDisplay.clear();
-            state->noSeedNextWord = false;
-            state->surroundingFailures = 0;
-            state->manualMode = true;
-            state->modeDecided = true;
-            state->mode = desired;
-            state->autoMode = desired;
-            updatePreeditUI(ic, *state);
-            if (debugEnabled()) {
-                FCITX_INFO() << "openkey: force preedit for browser-like program="
-                             << state->program
-                             << " mode=" << static_cast<int>(state->mode);
-            }
-        }
-    }
-
-    // Switch composition mode hotkey (Auto -> ST -> Backspace -> Preedit -> Direct -> Auto).
-        if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
-            auto clearComposingState = [this, ic, state]() {
+    if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
+        auto clearComposingState = [this, ic, state]() {
             state->shownText.clear();
             state->hasRewrittenCurrentWord = false;
             state->rewriteLock = false;
@@ -1947,94 +1802,52 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             updatePreeditUI(ic, *state);
         };
 
-        // X11 browsers: always stay in preedit mode (disable other runtime
-        // mode options).
-        if (isX11Backend(ic) && isBrowserProgram(state->program)) {
-            state->manualMode = true;
-            state->modeDecided = true;
-            if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
-                state->mode = RuntimeMode::DirectCommit;
-                state->autoMode = RuntimeMode::DirectCommit;
-            } else {
-                state->mode = RuntimeMode::Preedit;
-                state->autoMode = RuntimeMode::Preedit;
-            }
-            if (debugEnabled()) {
-                FCITX_INFO() << "openkey: force mode for x11 browser program="
-                             << state->program
-                             << " mode=" << static_cast<int>(state->mode);
-            }
-            clearComposingState();
-            if (instance_) {
-                instance_->showInputMethodInformation(ic);
-            }
-            // Continue with the existing toast code path below.
-        } else {
-        // Ensure we have a baseline auto mode for this context.
-        if (!state->modeDecided) {
-            state->lastCapability = ic->capabilityFlags();
-            state->mode = decideMode(ic, *state);
-            state->autoMode = state->mode;
-            state->modeDecided = true;
-        }
-
-        const auto canUseSurroundingText = [&]() -> bool {
-            const auto &st = ic->surroundingText();
-            if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-                return false;
-            }
-            if (!st.isValid() || st.cursor() != st.anchor()) {
-                return false;
-            }
-            if (!state->program.empty() &&
-                surroundingBlacklist_.find(state->program) != surroundingBlacklist_.end()) {
-                return false;
-            }
-            if (!fcitx::utf8::validate(st.text())) {
-                return false;
-            }
-            if (st.cursor() > fcitx::utf8::length(st.text())) {
-                return false;
-            }
-            return true;
-        };
-
+        bool returnToAuto = false;
+        RuntimeMode nextMode;
         if (!state->manualMode) {
-            // Enter manual mode.
-            state->manualMode = true;
-            if (canUseSurroundingText()) {
-                state->mode = RuntimeMode::SurroundingText;
-            } else {
-                state->mode = RuntimeMode::BackspaceRewriteDelta;
-            }
+            // First manual override: always offer SurroundingText first.
+            nextMode = RuntimeMode::SurroundingText;
         } else if (state->mode == RuntimeMode::SurroundingText) {
-            state->mode = RuntimeMode::BackspaceRewriteDelta;
+            nextMode = RuntimeMode::BackspaceRewriteDelta;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
-            state->mode = RuntimeMode::Preedit;
+            nextMode = RuntimeMode::Preedit;
         } else if (state->mode == RuntimeMode::Preedit) {
-            state->mode = RuntimeMode::DirectCommit;
-        } else if (state->mode == RuntimeMode::DirectCommit) {
-            // Leave manual mode and go back to auto decision.
+            nextMode = RuntimeMode::DirectCommit;
+        } else {
+            returnToAuto = true;
+        }
+
+        if (returnToAuto) {
             state->manualMode = false;
             state->modeDecided = false;
             state->lastCapability = ic->capabilityFlags();
-            state->mode = decideMode(ic, *state);
+            state->mode = decideMode(ic, *state, false);
             state->autoMode = state->mode;
             state->modeDecided = true;
+            if (!state->program.empty()) {
+                setAppModeForProgram(state->program, RuntimeMode::Auto);
+                persistAppModes();
+            }
+        } else {
+            state->manualMode = true;
+            state->mode = nextMode;
+            if (!state->program.empty()) {
+                setAppModeForProgram(state->program, nextMode);
+                persistAppModes();
+            }
         }
 
         if (debugEnabled()) {
-            FCITX_INFO() << "openkey: switch mode hotkey program=" << state->program
+            FCITX_INFO() << "openkey: switch mode hotkey program="
+                         << state->program
                          << " manual=" << (state->manualMode ? 1 : 0)
                          << " mode=" << static_cast<int>(state->mode);
         }
         clearComposingState();
-
-        // Show mode information immediately when hotkey is pressed.
         if (instance_) {
             instance_->showInputMethodInformation(ic);
         }
-        }
+
         // Fallback "toast" in input panel for UIs that don't display the popup.
         {
             auto inputTypeLabel = [&](InputType t) -> std::string {
@@ -2052,6 +1865,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             };
             auto runtimeModeLabel = [&](RuntimeMode m) -> std::string {
                 switch (m) {
+                case RuntimeMode::Auto:
+                    return "Auto";
                 case RuntimeMode::SurroundingText:
                     return "Surrounding";
                 case RuntimeMode::Preedit:
@@ -2119,22 +1934,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         return;
     }
 
-    // Decide mode per input context.
-    if (!state->modeDecided) {
-        state->lastCapability = ic->capabilityFlags();
-        state->mode = decideMode(ic, *state);
-        state->autoMode = state->mode;
-        state->modeDecided = true;
-
-        if (debugEnabled()) {
-            FCITX_INFO() << "openkey: detect mode program=" << state->program
-                         << " cap=" << ic->capabilityFlags()
-                         << " mode=" << static_cast<int>(state->mode);
-        }
-    }
-
     bool handled = false;
     switch (state->mode) {
+    case RuntimeMode::Auto:
+        return;
     case RuntimeMode::DirectCommit:
         return;
     case RuntimeMode::BackspaceRewriteDelta:
@@ -2151,27 +1954,21 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         handled = handleSurroundingText(ic, event, *state);
         if (!handled) {
             // If surrounding text is flaky for this app, blacklist it and
-            // fallback to backspace rewrite (uinput). If that fails, fallback
-            // to preedit as a last resort.
-            // Heuristic: repeated failures to use surrounding text.
+            // demote to backspace rewrite. This is a final fallback.
             if (state->surroundingFailures >= 3) {
                 if (debugEnabled()) {
                     FCITX_INFO() << "openkey: fallback to backspace program="
                                  << state->program
                                  << " reason=surrounding_failures";
                 }
-                addProgramToBlacklist(state->program);
                 state->mode = RuntimeMode::BackspaceRewriteDelta;
-                // Re-handle this key in backspace mode immediately so the key
-                // doesn't leak to application as raw ASCII when we fallback.
+                if (!state->program.empty()) {
+                    setAppModeForProgram(state->program,
+                                         RuntimeMode::BackspaceRewriteDelta);
+                    persistAppModes();
+                }
                 if (backspaceRewriteHandler_) {
                     (void)backspaceRewriteHandler_->handleKey(ic, event, *state);
-                }
-                if (!event.accepted()) {
-                    // Last resort.
-                    state->mode = RuntimeMode::Preedit;
-                    adapter_->setCodeTable(state->codeTable);
-                    (void)handlePreedit(ic, event, *state);
                 }
             }
         }
