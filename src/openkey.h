@@ -81,7 +81,7 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                             this,
                             "BackspaceRewriteUinputInterKeyUsec",
                             N_("Backspace-rewrite: uinput inter-backspace delay (usec)"),
-                            1000};
+                            300};
                     fcitx::Option<bool> freeMark{this,
                                                  "FreeMark",
                                                  N_("Free Mark"),
