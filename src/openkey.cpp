@@ -224,6 +224,8 @@ static std::string runtimeModeToString(RuntimeMode mode) {
     switch (mode) {
     case RuntimeMode::Auto:
         return "auto";
+    case RuntimeMode::Browser:
+        return "browser";
     case RuntimeMode::Preedit:
         return "preedit";
     case RuntimeMode::SurroundingText:
@@ -239,6 +241,10 @@ static std::string runtimeModeToString(RuntimeMode mode) {
 static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
     if (equalsASCIIInsensitive(mode, "auto")) {
         out = RuntimeMode::Auto;
+        return true;
+    }
+    if (equalsASCIIInsensitive(mode, "browser")) {
+        out = RuntimeMode::Browser;
         return true;
     }
     if (equalsASCIIInsensitive(mode, "preedit")) {
@@ -455,6 +461,33 @@ public:
             return Method::Uinput;
         }
         return Method::None;
+    }
+
+    Method sendBackspacesUinputOnly(fcitx::InputContext *ic,
+                                    const std::string &program, int count,
+                                    bool debug,
+                                    uint64_t uinputInterKeyUsec = 1500) {
+        if (count <= 0) {
+            return Method::None;
+        }
+        if (!ensureUinput(debug)) {
+            if (debug) {
+                FCITX_INFO() << "openkey: backspace method=browser-uinput-none"
+                             << " program=" << program
+                             << " frontend=" << (ic && ic->frontend() ? ic->frontend() : "")
+                             << " count=" << count
+                             << " reason=uinput-unavailable";
+            }
+            return Method::None;
+        }
+        if (debug) {
+            FCITX_INFO() << "openkey: backspace method=browser-uinput"
+                         << " program=" << program
+                         << " frontend=" << (ic && ic->frontend() ? ic->frontend() : "")
+                         << " count=" << count;
+        }
+        sendBackspacesUinput(count, uinputInterKeyUsec);
+        return Method::Uinput;
     }
 
     bool uinputAvailable(bool debug) { return ensureUinput(debug); }
@@ -695,6 +728,7 @@ struct ModeDeps {
     std::function<uint64_t()> bsRewriteCommitExtraUsec;
     std::function<uint64_t()> bsRewriteCommitCapUsec;
     std::function<uint64_t()> bsRewriteUinputInterKeyUsec;
+    std::function<uint64_t()> browserRewriteCommitDelayUsec;
 };
 
 class BackspaceRewriteModeHandler final : public InputModeHandler {
@@ -725,6 +759,10 @@ public:
             deps_.bsRewriteUinputInterKeyUsec
                 ? deps_.bsRewriteUinputInterKeyUsec()
                 : 1500;
+        const uint64_t browserCommitDelayUsec =
+            deps_.browserRewriteCommitDelayUsec
+                ? deps_.browserRewriteCommitDelayUsec()
+                : 50000;
         auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
 
         auto stateFor = [this](fcitx::InputContext *ic2) -> OpenKeyState * {
@@ -773,7 +811,8 @@ public:
         };
 
         auto finishPendingBackspaceCommit =
-            [this, icRef, lifetimeWeak, stateFor, drainPendingKeys]() {
+            [this, icRef, lifetimeWeak, loop, stateFor, drainPendingKeys,
+             browserCommitDelayUsec]() {
                 if (lifetimeWeak.expired()) {
                     return;
                 }
@@ -798,11 +837,49 @@ public:
                     ic2->commitString(commitText);
                 }
                 st->shownText = shownAfter;
-                st->rewriteLock = false;
                 st->waitingBackspaceAck = false;
+                if (st->mode != RuntimeMode::Browser) {
+                    st->expectedBackspaces = 0;
+                    st->seenBackspaces = 0;
+                }
+
+                if (st->mode == RuntimeMode::Browser &&
+                    browserCommitDelayUsec > 0 && loop) {
+                    const uint64_t deadline =
+                        fcitx::now(CLOCK_MONOTONIC) +
+                        browserCommitDelayUsec;
+                    st->commitTimer = loop->addTimeEvent(
+                        CLOCK_MONOTONIC, deadline, 0,
+                        [this, icRef, lifetimeWeak, stateFor,
+                         drainPendingKeys](fcitx::EventSourceTime *,
+                                           uint64_t) {
+                            if (lifetimeWeak.expired()) {
+                                return false;
+                            }
+                            auto *ic3 = icRef.get();
+                            if (!ic3) {
+                                return false;
+                            }
+                            auto *st2 = stateFor(ic3);
+                            if (!st2) {
+                                return false;
+                            }
+                            auto _timer = std::move(st2->commitTimer);
+                            st2->expectedBackspaces = 0;
+                            st2->seenBackspaces = 0;
+                            st2->rewriteLock = false;
+                            drainPendingKeys();
+                            return false;
+                        });
+                    if (st->commitTimer) {
+                        st->commitTimer->setOneShot();
+                        return;
+                    }
+                }
+
                 st->expectedBackspaces = 0;
                 st->seenBackspaces = 0;
-
+                st->rewriteLock = false;
                 drainPendingKeys();
             };
 
@@ -811,6 +888,7 @@ public:
              finishPendingBackspaceCommit](uint64_t delayUsec) {
                 state.commitTimer.reset();
                 if (!loop) {
+                    finishPendingBackspaceCommit();
                     return;
                 }
                 const uint64_t deadline =
@@ -840,89 +918,112 @@ public:
                 }
             };
 
-	auto applyWordDelta = [&, this](const std::string &newWord,
-	                                char asciiChar,
-	                                const char *reason) -> bool {
-	    if (!deps_.backspaceInjector) {
-	        return false;
-	    }
-    if (!fcitx::utf8::validate(state.shownText) ||
-        !fcitx::utf8::validate(newWord)) {
-        clearWordState();
-        return false;
-    }
+        auto applyWordDelta = [&, this](const std::string &newWord,
+                                        char asciiChar,
+                                        const char *reason) -> bool {
+            if (!deps_.backspaceInjector) {
+                return false;
+            }
+            if (!fcitx::utf8::validate(state.shownText) ||
+                !fcitx::utf8::validate(newWord)) {
+                clearWordState();
+                return false;
+            }
 
-    const std::string oldShown = state.shownText;
-    const std::string rawAppend = oldShown + asciiChar;
+            const std::string oldShown = state.shownText;
+            const std::string rawAppend = oldShown + asciiChar;
 
-    const std::size_t prefixLen =
-        commonPrefixBytesUTF8Boundary(state.shownText, newWord);
-    unsigned int deleteCount =
-        utf8CharCount(state.shownText.substr(prefixLen));
-    std::string commitText = newWord.substr(prefixLen);
-    if (deleteCount > 128) {
-        deleteCount = utf8CharCount(state.shownText);
-        commitText = newWord;
-    }
+            const std::size_t prefixLen =
+                commonPrefixBytesUTF8Boundary(state.shownText, newWord);
+            unsigned int deleteCount =
+                utf8CharCount(state.shownText.substr(prefixLen));
+            std::string commitText = newWord.substr(prefixLen);
+            if (deleteCount > 128) {
+                deleteCount = utf8CharCount(state.shownText);
+                commitText = newWord;
+            }
 
-    if (debug) {
-        FCITX_INFO() << "openkey: bs-delta program=" << state.program
-                     << " reason=" << reason
-                     << " from=" << state.shownText
-                     << " to=" << newWord
-                     << " delete=" << deleteCount
-                     << " commit=" << commitText;
-    }
+            if (debug) {
+                FCITX_INFO() << "openkey: bs-delta program=" << state.program
+                             << " reason=" << reason
+                             << " from=" << state.shownText
+                             << " to=" << newWord
+                             << " delete=" << deleteCount
+                             << " commit=" << commitText;
+            }
 
-    if (deleteCount == 0) {
-        if (!commitText.empty()) {
-            ic->commitString(commitText);
-        }
-        state.shownText = newWord;
-        state.hasRewrittenCurrentWord =
-            state.hasRewrittenCurrentWord || (newWord != rawAppend);
-        event.filterAndAccept();
-        return true;
-	    }
-	
-	    // Thử DeleteSurroundingText trước (GTK, Qt app reliable)
-const std::string programForInjector = state.program;
-	    const auto method = deps_.backspaceInjector->sendBackspaces(
-	        ic, programForInjector, static_cast<int>(deleteCount), debug,
-	        uinputInterKeyUsec);
+            if (deleteCount == 0) {
+                if (!commitText.empty()) {
+                    ic->commitString(commitText);
+                }
+                state.shownText = newWord;
+                state.hasRewrittenCurrentWord =
+                    state.hasRewrittenCurrentWord || (newWord != rawAppend);
+                event.filterAndAccept();
+                return true;
+            }
 
-    if (method == BackspaceInjector::Method::DeleteSurroundingText) {
-        // Không cần chờ ack, commit ngay
-        if (!commitText.empty()) {
-            ic->commitString(commitText);
-        }
-        state.shownText = newWord;
-        state.hasRewrittenCurrentWord =
-            state.hasRewrittenCurrentWord || (newWord != rawAppend);
-        event.filterAndAccept();
-        return true;
-    }
+            // Browser mode uses a separate uinput+timer transaction. Other
+            // backspace-rewrite mode keeps the reliable-app DST/uinput fallback.
+            const std::string programForInjector = state.program;
+            const bool browserMode = state.mode == RuntimeMode::Browser;
+            const auto method =
+                browserMode
+                    ? deps_.backspaceInjector->sendBackspacesUinputOnly(
+                          ic, programForInjector,
+                          static_cast<int>(deleteCount), debug,
+                          uinputInterKeyUsec)
+                    : deps_.backspaceInjector->sendBackspaces(
+                          ic, programForInjector,
+                          static_cast<int>(deleteCount), debug,
+                          uinputInterKeyUsec);
 
-	    if (method == BackspaceInjector::Method::Uinput) {
-	        // Inject thêm 1 backspace extra làm trigger ack
-	        // (N backspace xóa text + 1 backspace loop back báo xong)
-	        deps_.backspaceInjector->sendBackspaces(
-	            ic, programForInjector, 1, debug, uinputInterKeyUsec);
+            if (method == BackspaceInjector::Method::DeleteSurroundingText) {
+                // Không cần chờ ack, commit ngay.
+                if (!commitText.empty()) {
+                    ic->commitString(commitText);
+                }
+                state.shownText = newWord;
+                state.hasRewrittenCurrentWord =
+                    state.hasRewrittenCurrentWord || (newWord != rawAppend);
+                event.filterAndAccept();
+                return true;
+            }
 
-        state.rewriteLock = true;
-        state.waitingBackspaceAck = true;
-        state.expectedBackspaces = static_cast<int>(deleteCount) + 1;
-        state.seenBackspaces = 0;
-        state.pendingConvertedText = std::move(commitText);
-        state.pendingShownTextAfterCommit = newWord;
-        event.filterAndAccept();
-        return true;
-    }
+            if (method == BackspaceInjector::Method::Uinput) {
+                if (browserMode) {
+                    state.rewriteLock = true;
+                    state.expectedBackspaces =
+                        static_cast<int>(deleteCount);
+                    state.seenBackspaces = 0;
+                    state.pendingConvertedText = std::move(commitText);
+                    state.pendingShownTextAfterCommit = newWord;
+                    state.hasRewrittenCurrentWord =
+                        state.hasRewrittenCurrentWord ||
+                        (newWord != rawAppend);
+                    event.filterAndAccept();
+                    scheduleCommitAfterBackspace(browserCommitDelayUsec);
+                    return true;
+                }
 
-    // Uinput không available
-    clearWordState();
-    return false;
-};
+                // Inject thêm 1 backspace extra làm trigger ack
+                // (N backspace xóa text + 1 backspace loop back báo xong).
+                deps_.backspaceInjector->sendBackspaces(
+                    ic, programForInjector, 1, debug, uinputInterKeyUsec);
+
+                state.rewriteLock = true;
+                state.waitingBackspaceAck = true;
+                state.expectedBackspaces = static_cast<int>(deleteCount) + 1;
+                state.seenBackspaces = 0;
+                state.pendingConvertedText = std::move(commitText);
+                state.pendingShownTextAfterCommit = newWord;
+                event.filterAndAccept();
+                return true;
+            }
+
+            clearWordState();
+            return false;
+        };
         if (state.waitingBackspaceAck) {
             if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
                 key.check(FcitxKey_ISO_Enter) || key.isCursorMove() ||
@@ -957,6 +1058,12 @@ const std::string programForInjector = state.program;
 
         // If we are currently rewriting, queue and swallow all physical keys.
         if (state.rewriteLock) {
+            if (state.mode == RuntimeMode::Browser &&
+                state.expectedBackspaces > 0 &&
+                key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
+                state.expectedBackspaces--;
+                return false;
+            }
             state.pendingKeys.push_back(key);
             event.filterAndAccept();
             return true;
@@ -981,6 +1088,13 @@ const std::string programForInjector = state.program;
             }
             if (!state.hasRewrittenCurrentWord) {
                 clearWordState();
+                return false;
+            }
+            if (state.mode == RuntimeMode::Browser) {
+                state.shownText = utf8DropLastN(state.shownText, 1);
+                if (state.shownText.empty()) {
+                    state.hasRewrittenCurrentWord = false;
+                }
                 return false;
             }
             const std::string programForInjector = state.program;
@@ -1008,14 +1122,14 @@ const std::string programForInjector = state.program;
                 return false;
             }
 
-	        // Word characters: apply OpenKey changes immediately via delta.
-	        if (isComposingASCII(c)) {
-	            if (!adapterShared) {
-	                return false;
-	            }
+            // Word characters: apply OpenKey changes immediately via delta.
+            if (isComposingASCII(c)) {
+                if (!adapterShared) {
+                    return false;
+                }
                 adapterShared->setCodeTable(state.codeTable);
-	            const auto r =
-	                adapterShared->processAsciiKey(state.shownText, c);
+                const auto r =
+                    adapterShared->processAsciiKey(state.shownText, c);
 	            if (!r.handled) {
 	                return false;
 	            }
@@ -1065,6 +1179,10 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
         return static_cast<uint64_t>(
             std::max(0, config_.bsRewriteUinputInterKeyUsec.value()));
     };
+    deps.browserRewriteCommitDelayUsec = [this]() -> uint64_t {
+        return static_cast<uint64_t>(
+            std::max(0, config_.browserRewriteCommitDelayUsec.value()));
+    };
     backspaceRewriteHandler_ =
         std::make_unique<BackspaceRewriteModeHandler>(std::move(deps));
     reloadConfig();
@@ -1101,6 +1219,8 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
         switch (m) {
         case RuntimeMode::Auto:
             return "Auto";
+        case RuntimeMode::Browser:
+            return "Browser";
         case RuntimeMode::SurroundingText:
             return "Surrounding";
         case RuntimeMode::Preedit:
@@ -1130,6 +1250,8 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
     switch (state->mode) {
     case RuntimeMode::Auto:
         return "Auto";
+    case RuntimeMode::Browser:
+        return "Browser";
     case RuntimeMode::SurroundingText:
         return "Surrounding";
     case RuntimeMode::Preedit:
@@ -1335,11 +1457,11 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
         return it->second;
     }
 
-    // Browsers are often fragile with surrounding-text/backspace rewrite.
-    // Force preedit for better UX.
+    // Browser mode is backspace rewrite with a separate uinput+timer
+    // transaction, avoiding deleteSurroundingText entirely.
     if (isBrowserProgram(s.program) ||
         (isWaylandBackend(ic) && s.program.empty())) {
-        const auto mode = RuntimeMode::Preedit;
+        const auto mode = RuntimeMode::Browser;
         if (writeBack && !normalizedProgram.empty()) {
             appModeMap_[normalizedProgram] = mode;
             persistAppModes();
@@ -1842,6 +1964,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             // First manual override: always offer SurroundingText first.
             nextMode = RuntimeMode::SurroundingText;
         } else if (state->mode == RuntimeMode::SurroundingText) {
+            nextMode = RuntimeMode::Browser;
+        } else if (state->mode == RuntimeMode::Browser) {
             nextMode = RuntimeMode::BackspaceRewriteDelta;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
             nextMode = RuntimeMode::Preedit;
@@ -1901,6 +2025,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 switch (m) {
                 case RuntimeMode::Auto:
                     return "Auto";
+                case RuntimeMode::Browser:
+                    return "Browser";
                 case RuntimeMode::SurroundingText:
                     return "Surrounding";
                 case RuntimeMode::Preedit:
@@ -1974,6 +2100,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         return;
     case RuntimeMode::DirectCommit:
         return;
+    case RuntimeMode::Browser:
     case RuntimeMode::BackspaceRewriteDelta:
         if (backspaceRewriteHandler_) {
             handled = backspaceRewriteHandler_->handleKey(ic, event, *state);

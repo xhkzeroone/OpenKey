@@ -82,6 +82,12 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                             "BackspaceRewriteUinputInterKeyUsec",
                             N_("Backspace-rewrite: uinput inter-backspace delay (usec)"),
                             1000};
+                    fcitx::HiddenOption<int>
+                        browserRewriteCommitDelayUsec{
+                            this,
+                            "BrowserRewriteCommitDelayUsec",
+                            N_("Browser mode: delay after uinput backspace before commit (usec)"),
+                            50000};
                     fcitx::Option<bool> freeMark{this,
                                                  "FreeMark",
                                                  N_("Free Mark"),
@@ -169,6 +175,7 @@ FCITX_CONFIGURATION(OpenKeyConfig,
 
 enum class RuntimeMode {
     Auto,
+    Browser,
     BackspaceRewriteDelta,
     SurroundingText,
     Preedit,
