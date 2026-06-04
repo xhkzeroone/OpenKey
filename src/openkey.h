@@ -87,7 +87,7 @@ FCITX_CONFIGURATION(OpenKeyConfig,
                             this,
                             "BrowserRewriteCommitDelayUsec",
                             N_("Browser mode: delay after uinput backspace before commit (usec)"),
-                            50000};
+                            150000};
                     fcitx::Option<bool> freeMark{this,
                                                  "FreeMark",
                                                  N_("Free Mark"),
@@ -191,10 +191,12 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     bool waitingBackspaceAck = false;
     int expectedBackspaces = 0;
     int seenBackspaces = 0;
+    int lateBackspaceBudget = 0;
     std::vector<fcitx::Key> pendingKeys;
     uint64_t lastPhysicalKeyUsec = 0;
     std::unique_ptr<fcitx::EventSourceTime> rewriteTimer;
     std::unique_ptr<fcitx::EventSourceTime> commitTimer;
+    std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
     std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
     std::string pendingConvertedText;
     std::string pendingShownTextAfterCommit;
