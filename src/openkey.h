@@ -176,6 +176,7 @@ FCITX_CONFIGURATION(OpenKeyConfig,
 enum class RuntimeMode {
     Auto,
     Browser,
+    BrowserX11,
     BackspaceRewriteDelta,
     SurroundingText,
     Preedit,
@@ -217,8 +218,12 @@ struct DeltaRewriteState {
     bool waitingBackspaceAck = false;
     int expectedBackspaces = 0;
     int seenBackspaces = 0;
+    int lateBackspaceBudget = 0;
     std::vector<fcitx::Key> pendingKeys;
+    std::unique_ptr<fcitx::EventSourceTime> drainPendingTimer;
     std::unique_ptr<fcitx::EventSourceTime> commitTimer;
+    std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
+    std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
     std::string pendingConvertedText;
     std::string pendingShownTextAfterCommit;
 
@@ -229,8 +234,12 @@ struct DeltaRewriteState {
         waitingBackspaceAck = false;
         expectedBackspaces = 0;
         seenBackspaces = 0;
+        lateBackspaceBudget = 0;
         pendingKeys.clear();
+        drainPendingTimer.reset();
         commitTimer.reset();
+        lateBackspaceTimeoutTimer.reset();
+        ackTimeoutTimer.reset();
         pendingConvertedText.clear();
         pendingShownTextAfterCommit.clear();
     }
@@ -300,6 +309,7 @@ private:
     std::unique_ptr<FocusedAppBridge> focusedAppBridge_;
 
     std::unique_ptr<InputModeHandler> browserRewriteHandler_;
+    std::unique_ptr<InputModeHandler> browserX11RewriteHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
 
     bool debugEnabled() const;

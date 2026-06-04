@@ -258,6 +258,27 @@ Cách xử lý:
 
 Đây thường là vấn đề mode chứ không phải addon hỏng.
 
+Nếu lỗi chỉ xảy ra ở thanh địa chỉ của browser, nhất là Microsoft Edge trên
+Wayland, nguyên nhân có thể là autocomplete / inline suggestion của browser ăn
+mất `Backspace` đầu tiên. Triệu chứng thường gặp:
+
+- `go` + `x` ra `goõ` thay vì `gõ`
+- `d` + `d` ra `dđ` thay vì `đ`
+- `e` + `e` ra `eê` thay vì `ê`
+
+Workaround nhanh nhất trên Edge:
+
+1. Mở `edge://settings/privacy/services/search/searchFilters`
+2. Tắt tùy chọn  
+   `Show suggestions from history, favorites and other data on this device using your typed characters`
+
+Lưu ý:
+
+- workaround này chủ yếu nhắm vào `address bar`
+- ô nhập liệu trong trang web có thể vẫn hoạt động bình thường
+- nếu chỉ tắt setting này mà hết lỗi, thì vấn đề nằm ở lớp suggestion của
+  browser chứ không phải logic Telex/VNI
+
 Nên thử:
 
 - đổi mode compose bằng `Alt+Space`
