@@ -2457,11 +2457,11 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
         return RuntimeMode::Preedit;
     }
 
-    // Browser mode is backspace rewrite with a separate uinput+timer
-    // transaction, avoiding deleteSurroundingText entirely.
+    // Wayland browsers default to delta rewrite. The dedicated Browser
+    // transaction remains available as an explicit per-app/manual mode.
     if (!browserDisabled && isWaylandBackend(ic) &&
         isBrowserProgram(s.program)) {
-        const auto mode = RuntimeMode::Browser;
+        const auto mode = RuntimeMode::BackspaceRewriteDelta;
         if (writeBack && !normalizedProgram.empty()) {
             appModeMap_[normalizedProgram] = mode;
             persistAppModes();
