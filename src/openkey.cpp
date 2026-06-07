@@ -626,6 +626,14 @@ static bool isFcitx4Frontend(fcitx::InputContext *ic) {
     return asciiLower(ic->frontend()).find("fcitx4") != std::string::npos;
 }
 
+static bool isXimFrontend(fcitx::InputContext *ic) {
+    if (!ic || !ic->frontend()) {
+        return false;
+    }
+    return asciiLower(ic->frontend()).find("xim") != std::string::npos;
+}
+
+
 static bool isBrowserLikeProgram(const std::string &program) {
     if (program.empty()) {
         return false;
@@ -1059,15 +1067,6 @@ struct DeltaModeDeps {
 };
 
 
-
-
-
-
-
-
-
-
-
 class BackspaceRewriteModeHandler final : public InputModeHandler {
 public:
     explicit BackspaceRewriteModeHandler(DeltaModeDeps deps)
@@ -1097,7 +1096,11 @@ public:
                 deltaState.ackTimeoutTimer.reset();
                 event.filterAndAccept();
                 const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
-                finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+                if (isXimFrontend(ic)) {
+                    scheduleFinishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+                } else {
+                    finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+                }
                 return true;
             }
 
@@ -1136,6 +1139,56 @@ private:
         deltaState.ackTimeoutTimer.reset();
         deltaState.pendingConvertedText.clear();
         deltaState.pendingShownTextAfterCommit.clear();
+    }
+
+    void scheduleFinishPendingBackspaceCommit(fcitx::InputContext *ic,
+                                          OpenKeyState &state,
+                                          uint64_t commitDelayUsec) {
+        auto &deltaState = state.delta;
+
+        if (!deps_.instance || commitDelayUsec == 0) {
+            finishPendingBackspaceCommit(ic, state, 0);
+            return;
+        }
+
+        const auto icRef = ic->watch();
+        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+        auto *loop = &deps_.instance->eventLoop();
+
+        deltaState.ackTimeoutTimer.reset();
+
+        const uint64_t deadline =
+            fcitx::now(CLOCK_MONOTONIC) + commitDelayUsec;
+
+        deltaState.ackTimeoutTimer = loop->addTimeEvent(
+            CLOCK_MONOTONIC, deadline, 0,
+            [this, icRef, lifetimeWeak]
+            (fcitx::EventSourceTime *, uint64_t) {
+                if (lifetimeWeak.expired()) {
+                    return false;
+                }
+
+                auto *ic2 = icRef.get();
+                if (!ic2) {
+                    return false;
+                }
+
+                auto *st = stateFor(ic2);
+                if (!st) {
+                    return false;
+                }
+
+                auto _timer = std::move(st->delta.ackTimeoutTimer);
+
+                finishPendingBackspaceCommit(ic2, *st, 0);
+                return false;
+            });
+
+        if (deltaState.ackTimeoutTimer) {
+            deltaState.ackTimeoutTimer->setOneShot();
+        } else {
+            finishPendingBackspaceCommit(ic, state, 0);
+        }
     }
 
     void finishPendingBackspaceCommit(fcitx::InputContext *ic,
@@ -1223,7 +1276,11 @@ private:
                              << " seen=" << st->delta.seenBackspaces
                              << " expected=" << st->delta.expectedBackspaces;
                 const DeltaRewriteTiming timing = deltaTimingFor(ic2, st->program);
-                finishPendingBackspaceCommit(ic2, *st, timing.commitDelayUsec);
+                if (isXimFrontend(ic2)) {
+                    scheduleFinishPendingBackspaceCommit(ic2, *st, timing.commitDelayUsec);
+                } else {
+                    finishPendingBackspaceCommit(ic2, *st, timing.commitDelayUsec);
+                }
                 return false;
             });
         if (deltaState.ackTimeoutTimer) {
