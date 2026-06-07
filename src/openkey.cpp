@@ -593,16 +593,16 @@ struct DeltaRewriteTiming {
 static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 30000};
 static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 30000};
 static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaX11Timing{2000, 60000};
+static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 30000};
 static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{2000, 60000};
-static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{4000, 120000};
-static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{4000, 120000};
+static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{2000, 60000};
+static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{2000, 60000};
 
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 30000};
 static constexpr RewriteTiming kNonPreeditX11Timing{2000, 60000};
 static constexpr RewriteTiming kNonPreeditWaylandFcitx4Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditX11Fcitx4Timing{4000, 120000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{4000, 120000};
+static constexpr RewriteTiming kNonPreeditX11Fcitx4Timing{2000, 60000};
+static constexpr RewriteTiming kNonPreeditX11BrowserTiming{2000, 60000};
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
