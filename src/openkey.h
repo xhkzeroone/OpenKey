@@ -281,7 +281,8 @@ private:
     std::shared_ptr<void> lifetime_;
     OpenKeyConfig config_;
 
-    std::unordered_map<std::string, RuntimeMode> appModeMap_;
+    std::unordered_map<std::string, RuntimeMode> x11AppModeMap_;
+    std::unordered_map<std::string, RuntimeMode> waylandAppModeMap_;
 
     fcitx::SimpleInputContextPropertyFactory<OpenKeyState> factory_;
 
@@ -299,7 +300,10 @@ private:
     bool debugEnabled() const;
     void loadAppModes();
     void persistAppModes();
-    void setAppModeForProgram(const std::string &program, RuntimeMode mode);
+    void setAppModeForProgram(fcitx::InputContext *ic,
+                              const std::string &program, RuntimeMode mode);
+    std::unordered_map<std::string, RuntimeMode> &appModeMapFor(
+        fcitx::InputContext *ic);
     void applyConfig();
     void persistConfig();
     bool nonPreeditServerAvailable();

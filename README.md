@@ -26,7 +26,7 @@ OpenKey Linux không chạy như một app riêng. Nó hoạt động theo mô h
 - `NonPreedit`: không hiện preedit, dùng backspace thật rồi commit lại chữ đã sửa
 - `backspace rewrite`: fallback khi helper `NonPreedit` không sẵn sàng
 
-Ở chế độ tự động, OpenKey ưu tiên `NonPreedit` nếu helper server kết nối được. Nếu helper không chạy được hoặc không có quyền `/dev/uinput`, OpenKey sẽ rơi về `backspace rewrite`.
+Ở chế độ tự động, OpenKey chọn mode khi focus vào ô nhập liệu. Mặc định OpenKey ưu tiên `NonPreedit` nếu helper server kết nối được. Riêng browser trên X11 sẽ dùng `preedit` để tránh lỗi rewrite/backspace trong thanh nhập liệu. Nếu helper không chạy được hoặc không có quyền `/dev/uinput`, OpenKey sẽ rơi về `backspace rewrite`.
 
 Vì vậy nếu "cài xong nhưng không gõ được", nguyên nhân thường không nằm ở core OpenKey mà nằm ở một trong các lớp sau:
 
@@ -198,7 +198,8 @@ Nếu chưa thấy `OpenKey`:
 ## File cấu hình quan trọng
 
 - `~/.config/fcitx5/conf/openkey.conf`: cấu hình chính
-- `~/.config/fcitx5/conf/openkey-appmodes.conf`: mode theo ứng dụng
+- `~/.config/fcitx5/conf/openkey-appmodes-x11.conf`: mode theo ứng dụng trên X11
+- `~/.config/fcitx5/conf/openkey-appmodes-wayland.conf`: mode theo ứng dụng trên Wayland
 
 Nếu bật macro, file macro được lấy theo đường dẫn bạn set trong cấu hình OpenKey.
 
@@ -357,13 +358,14 @@ Nếu helper không mở được `/dev/uinput`, triệu chứng có thể là m
 
 ### 8. Gõ được lúc đầu, sau đó một số app không nhận đúng mode
 
-OpenKey có lưu mode theo ứng dụng vào:
+OpenKey lưu mode theo ứng dụng riêng cho từng backend:
 
 ```bash
-~/.config/fcitx5/conf/openkey-appmodes.conf
+~/.config/fcitx5/conf/openkey-appmodes-x11.conf
+~/.config/fcitx5/conf/openkey-appmodes-wayland.conf
 ```
 
-Nếu file này chứa mode không phù hợp với app hiện tại, bạn có thể sửa tay hoặc xóa file để OpenKey học lại từ đầu.
+Nếu file của backend hiện tại chứa mode không phù hợp với app hiện tại, bạn có thể sửa tay hoặc xóa file đó để OpenKey học lại từ đầu.
 
 ### 9. Không chắc lỗi nằm ở OpenKey hay ở `fcitx5`
 

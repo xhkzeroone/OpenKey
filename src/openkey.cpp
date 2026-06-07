@@ -1973,50 +1973,66 @@ bool OpenKeyEngine::nonPreeditServerAvailable() {
 
 
 void OpenKeyEngine::loadAppModes() {
-    appModeMap_.clear();
-    fcitx::RawConfig raw;
-    fcitx::readAsIni(raw, fcitx::StandardPath::Type::PkgConfig,
-                     "conf/openkey-appmodes.conf");
-    for (const auto &section : raw.subItems()) {
-        const auto normalized = normalizedProgramName(section);
-        if (normalized.empty()) {
-            continue;
+    auto loadOne = [](const char *path,
+                      std::unordered_map<std::string, RuntimeMode> &out) {
+        out.clear();
+        fcitx::RawConfig raw;
+        fcitx::readAsIni(raw, fcitx::StandardPath::Type::PkgConfig, path);
+        for (const auto &section : raw.subItems()) {
+            const auto normalized = normalizedProgramName(section);
+            if (normalized.empty()) {
+                continue;
+            }
+            auto sectionConfig = raw.get(section);
+            if (!sectionConfig) {
+                continue;
+            }
+            const std::string *value = sectionConfig->valueByPath("mode");
+            if (!value) {
+                continue;
+            }
+            RuntimeMode mode;
+            if (!runtimeModeFromString(*value, mode)) {
+                continue;
+            }
+            out[normalized] = mode;
         }
-        auto sectionConfig = raw.get(section);
-        if (!sectionConfig) {
-            continue;
-        }
-        const std::string *value = sectionConfig->valueByPath("mode");
-        if (!value) {
-            continue;
-        }
-        RuntimeMode mode;
-        if (!runtimeModeFromString(*value, mode)) {
-            continue;
-        }
-        appModeMap_[normalized] = mode;
-    }
+    };
+
+    loadOne("conf/openkey-appmodes-x11.conf", x11AppModeMap_);
+    loadOne("conf/openkey-appmodes-wayland.conf", waylandAppModeMap_);
 }
 
 void OpenKeyEngine::persistAppModes() {
-    fcitx::RawConfig raw;
-    for (auto &[program, mode] : appModeMap_) {
-        if (program.empty()) {
-            continue;
+    auto persistOne = [](const char *path,
+                         const std::unordered_map<std::string, RuntimeMode> &map) {
+        fcitx::RawConfig raw;
+        for (const auto &[program, mode] : map) {
+            if (program.empty()) {
+                continue;
+            }
+            raw[program]["mode"] = runtimeModeToString(mode);
         }
-        raw[program]["mode"] = runtimeModeToString(mode);
-    }
-    fcitx::safeSaveAsIni(raw, fcitx::StandardPath::Type::PkgConfig,
-                         "conf/openkey-appmodes.conf");
+        fcitx::safeSaveAsIni(raw, fcitx::StandardPath::Type::PkgConfig, path);
+    };
+
+    persistOne("conf/openkey-appmodes-x11.conf", x11AppModeMap_);
+    persistOne("conf/openkey-appmodes-wayland.conf", waylandAppModeMap_);
 }
 
-void OpenKeyEngine::setAppModeForProgram(const std::string &program,
+void OpenKeyEngine::setAppModeForProgram(fcitx::InputContext *ic,
+                                         const std::string &program,
                                          RuntimeMode mode) {
     const auto normalized = normalizedProgramName(program);
     if (normalized.empty()) {
         return;
     }
-    appModeMap_[normalized] = mode;
+    appModeMapFor(ic)[normalized] = mode;
+}
+
+std::unordered_map<std::string, RuntimeMode> &OpenKeyEngine::appModeMapFor(
+    fcitx::InputContext *ic) {
+    return isRunningOnX11(ic) ? x11AppModeMap_ : waylandAppModeMap_;
 }
 
 OpenKeyState *OpenKeyEngine::stateFor(fcitx::InputContext *ic) {
@@ -2150,6 +2166,10 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     }
 
     state->codeTable = toOpenKeyCodeTable(config_.codeTable.value());
+    state->lastCapability = ic->capabilityFlags();
+    state->mode = decideMode(ic, *state);
+    state->autoMode = state->mode;
+    state->modeDecided = true;
 
     updatePreeditUI(ic, *state);
 }
@@ -2181,8 +2201,9 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     }
 
     const auto normalizedProgram = normalizedProgramName(s.program);
-    auto it = appModeMap_.find(normalizedProgram);
-    if (!normalizedProgram.empty() && it != appModeMap_.end() &&
+    auto &appModeMap = appModeMapFor(ic);
+    auto it = appModeMap.find(normalizedProgram);
+    if (!normalizedProgram.empty() && it != appModeMap.end() &&
         it->second != RuntimeMode::Auto) {
         const bool hasNonPreeditServer = nonPreeditServerAvailable();
         if (it->second == RuntimeMode::NonPreeditBackspaceRewrite &&
@@ -2199,11 +2220,14 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
         }
     }
 
-    const auto mode = nonPreeditServerAvailable()
-                          ? RuntimeMode::NonPreeditBackspaceRewrite
-                          : RuntimeMode::BackspaceRewriteDelta;
+    const auto mode =
+        (isRunningOnX11(ic) && isBrowserLikeProgram(normalizedProgram))
+            ? RuntimeMode::Preedit
+            : (nonPreeditServerAvailable()
+                   ? RuntimeMode::NonPreeditBackspaceRewrite
+                   : RuntimeMode::BackspaceRewriteDelta);
     if (writeBack && !normalizedProgram.empty()) {
-        appModeMap_[normalizedProgram] = mode;
+        appModeMap[normalizedProgram] = mode;
         persistAppModes();
     }
     return mode;
@@ -2647,7 +2671,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     // Ensure we have a baseline auto mode for this context.
     if (!state->modeDecided) {
         state->lastCapability = ic->capabilityFlags();
-        state->mode = decideMode(ic, *state);
+        state->mode = decideMode(ic, *state, false);
         state->autoMode = state->mode;
         state->modeDecided = true;
     }
@@ -2689,20 +2713,17 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
 
         if (returnToAuto) {
             state->manualMode = false;
-            state->modeDecided = false;
-            state->lastCapability = ic->capabilityFlags();
-            state->mode = decideMode(ic, *state, false);
-            state->autoMode = state->mode;
+            state->mode = state->autoMode;
             state->modeDecided = true;
             if (!state->program.empty()) {
-                setAppModeForProgram(state->program, RuntimeMode::Auto);
+                setAppModeForProgram(ic, state->program, RuntimeMode::Auto);
                 persistAppModes();
             }
         } else {
             state->manualMode = true;
             state->mode = nextMode;
             if (!state->program.empty()) {
-                setAppModeForProgram(state->program, nextMode);
+                setAppModeForProgram(ic, state->program, nextMode);
                 persistAppModes();
             }
         }
@@ -2840,7 +2861,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 }
                 state->mode = RuntimeMode::BackspaceRewriteDelta;
                 if (!state->program.empty()) {
-                    setAppModeForProgram(state->program,
+                    setAppModeForProgram(ic, state->program,
                                          RuntimeMode::BackspaceRewriteDelta);
                     persistAppModes();
                 }
