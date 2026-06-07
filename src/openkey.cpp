@@ -1073,53 +1073,82 @@ public:
         : deps_(std::move(deps)) {}
 
     bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-        if (event.isRelease()) {
-            return false;
-        }
-        if (hasCtrlAltSuperMeta(key)) {
-            return false;
-        }
+               OpenKeyState &state) override {
+    auto key = event.rawKey();
+    auto normKey = event.key().normalize();
 
-        const auto adapterShared = deps_.adapter;
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        auto &deltaState = state.delta;
+    auto isBackspace = [&]() {
+        return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
+    };
 
-        if (deltaState.waitingBackspaceAck) {
-            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
-                deltaState.seenBackspaces++;
-                if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
-                    return false;
-                }
+    if (event.isRelease()) {
+        return false;
+    }
 
-                deltaState.ackTimeoutTimer.reset();
-                event.filterAndAccept();
-                const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
-                if (isXimFrontend(ic)) {
-                    scheduleFinishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
-                } else {
-                    finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
-                }
-                return true;
+    if (hasCtrlAltSuperMeta(key)) {
+        return false;
+    }
+
+    const auto adapterShared = deps_.adapter;
+    const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+    auto &deltaState = state.delta;
+
+    if (deltaState.waitingBackspaceAck) {
+        if (isBackspace()) {
+            deltaState.seenBackspaces++;
+            if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
+                return false;
             }
 
-            deltaState.queuedKeys.push_back(key);
+            deltaState.ackTimeoutTimer.reset();
             event.filterAndAccept();
-            return true;
-        }
 
-        if (deltaState.rewriteLock) {
-            deltaState.queuedKeys.push_back(key);
-            event.filterAndAccept();
+            const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
+            if (isXimFrontend(ic)) {
+                scheduleFinishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+            } else {
+                finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
+            }
             return true;
         }
 
         deltaState.queuedKeys.push_back(key);
         event.filterAndAccept();
+        return true;
+    }
+
+    if (deltaState.rewriteLock) {
+        deltaState.queuedKeys.push_back(key);
+        event.filterAndAccept();
+        return true;
+    }
+
+    if (isBackspace()) {
+        clearWordState(deltaState);
+        return false;
+    }
+
+    if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
+        normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
+        return false;
+    }
+
+    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+    if (uni >= 0x20 && uni <= 0x7E) {
+        deltaState.queuedKeys.push_back(key);
+        event.filterAndAccept();
         pumpQueue(ic, state, adapterShared, debug);
         return true;
     }
+
+    if (key.isCursorMove() || normKey.isCursorMove() ||
+        key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
+        key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
+        clearWordState(deltaState);
+    }
+
+    return false;
+}
 
 private:
     OpenKeyState *stateFor(fcitx::InputContext *ic) const {
@@ -1377,7 +1406,6 @@ private:
                           std::shared_ptr<OpenKeyAdapter> adapterShared,
                           bool debug) {
         auto &deltaState = state.delta;
-        const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
 
         if (key.isCursorMove() || key.check(FcitxKey_Delete)) {
             clearWordState(deltaState);
@@ -1398,6 +1426,7 @@ private:
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
+            // Word boundaries: clear composition state, forward to app
             if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
                 key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
                 key.check(FcitxKey_Tab)) {
@@ -1405,21 +1434,25 @@ private:
                 return false;
             }
 
-            if (isComposingASCII(c)) {
-                if (!adapterShared) {
-                    return false;
-                }
-                adapterShared->setCodeTable(state.codeTable);
-                const auto r =
-                    adapterShared->processAsciiKey(deltaState.shownText, c);
-                if (!r.handled) {
-                    return false;
-                }
-                return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
+            // Only composing chars go to the engine.
+            // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
+            if (!isComposingASCII(c)) {
+                clearWordState(deltaState);
+                return false;
             }
 
-            clearWordState(deltaState);
-            return false;
+            if (!adapterShared) {
+                clearWordState(deltaState);
+                return false;
+            }
+            adapterShared->setCodeTable(state.codeTable);
+            const auto r =
+                adapterShared->processAsciiKey(deltaState.shownText, c);
+            if (!r.handled) {
+                clearWordState(deltaState);
+                return false;
+            }
+            return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
         clearWordState(deltaState);
@@ -1454,38 +1487,64 @@ public:
         : deps_(std::move(deps)) {}
 
     bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-        if (event.isRelease()) {
+               OpenKeyState &state) override {
+    auto key = event.rawKey();
+    auto normKey = event.key().normalize();
+
+    auto isBackspace = [&]() {
+        return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
+    };
+
+    if (event.isRelease()) {
+        return false;
+    }
+
+    if (hasCtrlAltSuperMeta(key)) {
+        return false;
+    }
+
+    const auto adapterShared = deps_.adapter;
+    const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+    auto &nonPreeditState = state.nonPreeditDelta;
+
+    state.delta.clear();
+
+    if (nonPreeditState.rewriteLock) {
+        if (isBackspace()) {
             return false;
         }
 
-        const auto adapterShared = deps_.adapter;
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        auto &nonPreeditState = state.nonPreeditDelta;
+        nonPreeditState.nonPreeditKeys.push_back(key);
+        event.filterAndAccept();
+        return true;
+    }
 
-        state.delta.clear();
+    if (isBackspace()) {
+        clearComposeState(nonPreeditState);
+        return false;
+    }
 
-        if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key) &&
-            !nonPreeditState.rewriteLock) {
-            clearComposeState(nonPreeditState);
-            return false;
-        }
+    if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
+        normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
+        return false;
+    }
 
-        if (nonPreeditState.rewriteLock) {
-            if (key.check(FcitxKey_BackSpace) && !hasCtrlAltSuperMeta(key)) {
-                return false;
-            }
-            nonPreeditState.nonPreeditKeys.push_back(key);
-            event.filterAndAccept();
-            return true;
-        }
-
+    const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+    if (uni >= 0x20 && uni <= 0x7E) {
         nonPreeditState.nonPreeditKeys.push_back(key);
         event.filterAndAccept();
         pumpNonPreedit(ic, state, adapterShared, debug);
         return true;
     }
+
+    if (key.isCursorMove() || normKey.isCursorMove() ||
+        key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
+        key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
+        clearComposeState(nonPreeditState);
+    }
+
+    return false;
+}
 
     void handleRemoteBackspaceAction(fcitx::InputContext *ic,
                                      OpenKeyState &state) {
@@ -1693,6 +1752,7 @@ private:
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
+            // Word boundaries: clear composition state, forward to app
             if (isBoundaryASCII(c) || nonPreeditKey.check(FcitxKey_Return) ||
                 nonPreeditKey.check(FcitxKey_KP_Enter) ||
                 nonPreeditKey.check(FcitxKey_ISO_Enter) ||
@@ -1701,18 +1761,25 @@ private:
                 return false;
             }
 
-            if (isComposingASCII(c)) {
-                if (!adapterShared) {
-                    return false;
-                }
-                adapterShared->setCodeTable(state.codeTable);
-                const auto r =
-                    adapterShared->processAsciiKey(nonPreeditState.shownText, c);
-                if (!r.handled) {
-                    return false;
-                }
-                return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
+            // Only composing chars go to the engine.
+            // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
+            if (!isComposingASCII(c)) {
+                clearComposeState(nonPreeditState);
+                return false;
             }
+
+            if (!adapterShared) {
+                clearComposeState(nonPreeditState);
+                return false;
+            }
+            adapterShared->setCodeTable(state.codeTable);
+            const auto r =
+                adapterShared->processAsciiKey(nonPreeditState.shownText, c);
+            if (!r.handled) {
+                clearComposeState(nonPreeditState);
+                return false;
+            }
+            return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
         clearComposeState(nonPreeditState);
