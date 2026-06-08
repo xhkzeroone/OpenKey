@@ -597,11 +597,13 @@ static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 50000};
 static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 100000};
 static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 100000};
 static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
+static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 10000;
 
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 50000};
 static constexpr RewriteTiming kNonPreeditX11Timing{1000, 50000};
 static constexpr RewriteTiming kNonPreeditFcitx4Timing{1000, 100000};
 static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 100000};
+static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 10000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -762,47 +764,6 @@ static bool shouldSkipDSTOnWayland(fcitx::InputContext *ic,
            (isBrowserLikeProgram(program) || isElectronLikeProgram(program));
 }
 
-static bool shouldUseDST(fcitx::InputContext *ic, const std::string &program,
-                         int count) {
-    if (!ic) {
-        return false;
-    }
-
-    //TODO: check again
-    if(!isRunningOnX11(ic)){
-        return false;
-    }
-
-    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-        return false;
-    }
-
-    // If we can't identify the program, prefer uinput/server backspace.
-    if (program.empty()) {
-        return false;
-    }
-
-    if (shouldSkipDSTOnWayland(ic, program)) {
-        return false;
-    }
-
-    const auto &st = ic->surroundingText();
-
-    if (!st.isValid()) {
-        return false;
-    }
-
-    if (st.cursor() != st.anchor()) {
-        return false;
-    }
-
-    if (static_cast<unsigned int>(count) > st.cursor()) {
-        return false;
-    }
-
-    return true;
-}
-
 static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
                                          const std::string &program) {
     const bool x11 = isRunningOnX11(ic);
@@ -853,35 +814,14 @@ public:
     ~BackspaceInjector() { destroyUinput(); }
 
     enum class Method {
-        DeleteSurroundingText,
         Uinput,
         None,
     };
 
-    Method sendBackspaces(fcitx::InputContext *ic, const std::string &program,
-                          int count, bool debug,
+    Method sendBackspaces(fcitx::InputContext *ic,
+                          const std::string &program, int count,
+                          bool debug,
                           uint64_t uinputInterKeyUsec = 1500) {
-        if (count <= 0) {
-            return Method::None;
-        }
-
-        // Use deleteSurroundingText only when the input context looks reliable.
-        if (shouldUseDST(ic, program, count)) {
-            ic->deleteSurroundingText(-count, count);
-            return Method::DeleteSurroundingText;
-        }
-
-        if (ensureUinput(debug)) {
-            sendBackspacesUinput(count, uinputInterKeyUsec);
-            return Method::Uinput;
-        }
-        return Method::None;
-    }
-
-    Method sendBackspacesUinputOnly(fcitx::InputContext *ic,
-                                    const std::string &program, int count,
-                                    bool debug,
-                                    uint64_t uinputInterKeyUsec = 1500) {
         if (count <= 0) {
             return Method::None;
         }
@@ -1241,6 +1181,10 @@ private:
     }
 
     void clearWordState(DeltaRewriteState &deltaState) const {
+        if (deltaState.hasPendingRewrite()) {
+            return;
+        }
+
         deltaState.shownText.clear();
         deltaState.hasRewrittenCurrentWord = false;
         deltaState.rewriteLock = false;
@@ -1309,6 +1253,7 @@ private:
         const std::string commitText = std::move(deltaState.pendingConvertedText);
         const std::string shownAfter =
             std::move(deltaState.pendingShownTextAfterCommit);
+        deltaState.commitTimer.reset();
         deltaState.pendingConvertedText.clear();
         deltaState.pendingShownTextAfterCommit.clear();
 
@@ -1325,7 +1270,6 @@ private:
             ic->commitString(commitText);
         }
         deltaState.shownText = shownAfter;
-        deltaState.rewriteLock = false;
         deltaState.waitingBackspaceAck = false;
         deltaState.expectedBackspaces = 0;
         deltaState.seenBackspaces = 0;
@@ -1334,6 +1278,59 @@ private:
             deltaState.hasRewrittenCurrentWord = false;
         }
 
+        if (!commitText.empty() && schedulePostCommitPump(ic, state)) {
+            return;
+        }
+
+        finishPostCommitPump(ic, state);
+    }
+
+    bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
+        auto &deltaState = state.delta;
+        if (!deps_.instance || kDeltaPostCommitPumpDelayUsec == 0) {
+            return false;
+        }
+
+        const auto icRef = ic->watch();
+        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+        auto *loop = &deps_.instance->eventLoop();
+        const uint64_t deadline =
+            fcitx::now(CLOCK_MONOTONIC) + kDeltaPostCommitPumpDelayUsec;
+
+        deltaState.commitTimer = loop->addTimeEvent(
+            CLOCK_MONOTONIC, deadline, 0,
+            [this, icRef, lifetimeWeak](fcitx::EventSourceTime *, uint64_t) {
+                if (lifetimeWeak.expired()) {
+                    return false;
+                }
+
+                auto *ic2 = icRef.get();
+                if (!ic2) {
+                    return false;
+                }
+
+                auto *st = stateFor(ic2);
+                if (!st) {
+                    return false;
+                }
+
+                auto _timer = std::move(st->delta.commitTimer);
+                finishPostCommitPump(ic2, *st);
+                return false;
+            });
+
+        if (!deltaState.commitTimer) {
+            return false;
+        }
+
+        deltaState.commitTimer->setOneShot();
+        return true;
+    }
+
+    void finishPostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
+        auto &deltaState = state.delta;
+        deltaState.commitTimer.reset();
+        deltaState.rewriteLock = false;
         pumpQueue(ic, state, deps_.adapter,
                   deps_.debugEnabled ? deps_.debugEnabled() : false);
     }
@@ -1420,10 +1417,12 @@ private:
         unsigned int deleteCount =
             utf8CharCount(deltaState.shownText.substr(prefixLen));
         std::string commitText = newWord.substr(prefixLen);
-        if (deleteCount > 0 &&
+        const bool browserAutocomplete =
+            deleteCount > 0 &&
             isBrowserLikeProgram(state.program) &&
             !deltaState.hasRewrittenCurrentWord &&
-            looksLikeBrowserAutocomplete(ic, deltaState.shownText)) {
+            looksLikeBrowserAutocomplete(ic, deltaState.shownText);
+        if (browserAutocomplete) {
             deleteCount += 1;
         }
         if (deleteCount > 128) {
@@ -1440,6 +1439,7 @@ private:
                          << " commit=" << commitText
                          << " inter=" << timing.interKeyUsec
                          << " commitDelay=" << timing.commitDelayUsec
+                         << " autocomplete=" << browserAutocomplete
                          << " queued=" << deltaState.queuedKeys.size();
         }
 
@@ -1458,20 +1458,10 @@ private:
             ic, programForInjector, static_cast<int>(deleteCount), debug,
             timing.interKeyUsec);
 
-        if (method == BackspaceInjector::Method::DeleteSurroundingText) {
-            if (!commitText.empty()) {
-                ic->commitString(commitText);
-            }
-            deltaState.shownText = newWord;
-            deltaState.hasRewrittenCurrentWord =
-                deltaState.hasRewrittenCurrentWord || (newWord != rawAppend);
-            return true;
-        }
-
         if (method == BackspaceInjector::Method::Uinput) {
             // One extra backspace acts as a sentinel: app receives the first N,
             // OpenKey consumes the last one and commits when it arrives.
-            deps_.backspaceInjector->sendBackspacesUinputOnly(
+            deps_.backspaceInjector->sendBackspaces(
                 ic, programForInjector, 1, debug, timing.interKeyUsec);
             deltaState.rewriteLock = true;
             deltaState.waitingBackspaceAck = true;
@@ -1640,7 +1630,7 @@ public:
             return;
         }
         const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        deps_.backspaceInjector->sendBackspacesUinputOnly(
+        deps_.backspaceInjector->sendBackspaces(
             ic, state.program, 1, debug, 0);
     }
 
@@ -1705,7 +1695,6 @@ private:
             ic->commitString(commitText);
         }
         nonPreeditState.shownText = shownAfter;
-        nonPreeditState.rewriteLock = false;
         nonPreeditState.waitingBackspaceAck = false;
         nonPreeditState.expectedBackspaces = 0;
         nonPreeditState.seenBackspaces = 0;
@@ -1716,6 +1705,59 @@ private:
             nonPreeditState.hasRewrittenCurrentWord = false;
         }
 
+        if (!commitText.empty() && schedulePostCommitPump(ic, state)) {
+            return;
+        }
+
+        finishPostCommitPump(ic, state);
+    }
+
+    bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
+        auto &nonPreeditState = state.nonPreeditDelta;
+        if (!deps_.instance || kNonPreeditPostCommitPumpDelayUsec == 0) {
+            return false;
+        }
+
+        const auto icRef = ic->watch();
+        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+        auto *loop = &deps_.instance->eventLoop();
+        const uint64_t deadline =
+            fcitx::now(CLOCK_MONOTONIC) + kNonPreeditPostCommitPumpDelayUsec;
+
+        nonPreeditState.commitTimer = loop->addTimeEvent(
+            CLOCK_MONOTONIC, deadline, 0,
+            [this, icRef, lifetimeWeak](fcitx::EventSourceTime *, uint64_t) {
+                if (lifetimeWeak.expired()) {
+                    return false;
+                }
+
+                auto *ic2 = icRef.get();
+                if (!ic2) {
+                    return false;
+                }
+
+                auto *st = stateFor(ic2);
+                if (!st) {
+                    return false;
+                }
+
+                auto _timer = std::move(st->nonPreeditDelta.commitTimer);
+                finishPostCommitPump(ic2, *st);
+                return false;
+            });
+
+        if (!nonPreeditState.commitTimer) {
+            return false;
+        }
+
+        nonPreeditState.commitTimer->setOneShot();
+        return true;
+    }
+
+    void finishPostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
+        auto &nonPreeditState = state.nonPreeditDelta;
+        nonPreeditState.commitTimer.reset();
+        nonPreeditState.rewriteLock = false;
         pumpNonPreedit(ic, state, deps_.adapter,
                   deps_.debugEnabled ? deps_.debugEnabled() : false);
     }
@@ -1741,10 +1783,12 @@ private:
         unsigned int deleteCount =
             utf8CharCount(nonPreeditState.shownText.substr(prefixLen));
         std::string commitText = newWord.substr(prefixLen);
-        if (deleteCount > 0 &&
+        const bool browserAutocomplete =
+            deleteCount > 0 &&
             isBrowserLikeProgram(state.program) &&
             !nonPreeditState.hasRewrittenCurrentWord &&
-            looksLikeBrowserAutocomplete(ic, nonPreeditState.shownText)) {
+            looksLikeBrowserAutocomplete(ic, nonPreeditState.shownText);
+        if (browserAutocomplete) {
             deleteCount += 1;
         }
         if (deleteCount > 128) {
@@ -1761,22 +1805,11 @@ private:
                          << " commit=" << commitText
                          << " inter=" << timing.interKeyUsec
                          << " delay=" << timing.commitDelayUsec
+                         << " autocomplete=" << browserAutocomplete
                          << " nonPreeditPending=" << nonPreeditState.nonPreeditKeys.size();
         }
 
         if (deleteCount == 0) {
-            if (!commitText.empty()) {
-                ic->commitString(commitText);
-            }
-            nonPreeditState.shownText = newWord;
-            nonPreeditState.hasRewrittenCurrentWord =
-                nonPreeditState.hasRewrittenCurrentWord || (newWord != rawAppend);
-            return true;
-        }
-
-        if (shouldUseDST(ic, state.program, static_cast<int>(deleteCount))) {
-            ic->deleteSurroundingText(-static_cast<int>(deleteCount),
-                                      static_cast<int>(deleteCount));
             if (!commitText.empty()) {
                 ic->commitString(commitText);
             }
@@ -1842,8 +1875,7 @@ private:
             }
             const auto method = deps_.backspaceInjector->sendBackspaces(
                 ic, state.program, 1, debug, timing.interKeyUsec);
-            if (method != BackspaceInjector::Method::Uinput &&
-                method != BackspaceInjector::Method::DeleteSurroundingText) {
+            if (method != BackspaceInjector::Method::Uinput) {
                 return false;
             }
             nonPreeditState.shownText = utf8DropLastN(nonPreeditState.shownText, 1);
@@ -2300,6 +2332,11 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
             it->second == RuntimeMode::DirectCommit) {
             return it->second;
         }
+        if (writeBack) {
+            appModeMap[normalizedProgram] = RuntimeMode::Preedit;
+            persistAppModes();
+        }
+        return RuntimeMode::Preedit;
     }
 
     const auto mode =
@@ -2782,8 +2819,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         if (!state->manualMode) {
             nextMode = firstManualMode();
         } else if (state->mode == RuntimeMode::NonPreeditBackspaceRewrite) {
-            nextMode = RuntimeMode::Preedit;
+            nextMode = RuntimeMode::SurroundingText;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
+            nextMode = RuntimeMode::SurroundingText;
+        } else if (state->mode == RuntimeMode::SurroundingText) {
             nextMode = RuntimeMode::Preedit;
         } else if (state->mode == RuntimeMode::Preedit) {
             nextMode = RuntimeMode::DirectCommit;
@@ -2805,7 +2844,11 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
             state->manualMode = true;
             state->mode = nextMode;
             if (!state->program.empty()) {
-                setAppModeForProgram(ic, state->program, nextMode);
+                setAppModeForProgram(
+                    ic, state->program,
+                    nextMode == RuntimeMode::SurroundingText
+                        ? RuntimeMode::Auto
+                        : nextMode);
                 persistAppModes();
             }
         }
@@ -2934,20 +2977,24 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         handled = handleSurroundingText(ic, event, *state);
         if (!handled) {
             // If surrounding text is flaky for this app, blacklist it and
-            // demote to backspace rewrite. This is a final fallback.
+            // demote to preedit. This is a final fallback.
             if (state->surroundingFailures >= 3) {
                 if (debugEnabled()) {
-                    FCITX_INFO() << "openkey: fallback to backspace program="
+                    FCITX_INFO() << "openkey: fallback to preedit program="
                                  << state->program
                                  << " reason=surrounding_failures";
                 }
-                state->mode = RuntimeMode::BackspaceRewriteDelta;
+                state->delta.clear();
+                state->nonPreeditDelta.clear();
+                state->rollbackWord.clear();
+                state->rollbackDisplay.clear();
+                state->mode = RuntimeMode::Preedit;
                 if (!state->program.empty()) {
-                    setAppModeForProgram(ic, state->program,
-                                         RuntimeMode::BackspaceRewriteDelta);
+                    setAppModeForProgram(ic, state->program, RuntimeMode::Preedit);
                     persistAppModes();
                 }
-                (void)handleBackspaceRewrite(ic, event, *state);
+                adapter_->setCodeTable(state->codeTable);
+                (void)handlePreedit(ic, event, *state);
             }
         }
         return;

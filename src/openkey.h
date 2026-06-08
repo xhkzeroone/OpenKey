@@ -164,11 +164,22 @@ struct DeltaRewriteState {
     int expectedBackspaces = 0;
     int seenBackspaces = 0;
     std::deque<fcitx::Key> queuedKeys;
+    std::unique_ptr<fcitx::EventSourceTime> commitTimer;
     std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
     std::string pendingConvertedText;
     std::string pendingShownTextAfterCommit;
 
+    bool hasPendingRewrite() const {
+        return rewriteLock || waitingBackspaceAck ||
+               !pendingConvertedText.empty() ||
+               !pendingShownTextAfterCommit.empty();
+    }
+
     void clear() {
+        if (hasPendingRewrite()) {
+            return;
+        }
+
         shownText.clear();
         hasRewrittenCurrentWord = false;
         rewriteLock = false;
@@ -177,6 +188,7 @@ struct DeltaRewriteState {
         expectedBackspaces = 0;
         seenBackspaces = 0;
         queuedKeys.clear();
+        commitTimer.reset();
         ackTimeoutTimer.reset();
         pendingConvertedText.clear();
         pendingShownTextAfterCommit.clear();
