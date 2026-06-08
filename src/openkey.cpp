@@ -1605,7 +1605,7 @@ public:
     }
 
     if (isBackspace()) {
-        clearComposeState(nonPreeditState);
+        clearComposeState(nonPreeditState, "backspace");
         return false;
     }
 
@@ -1625,7 +1625,7 @@ public:
     if (key.isCursorMove() || normKey.isCursorMove() ||
         key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
         key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-        clearComposeState(nonPreeditState);
+        clearComposeState(nonPreeditState, "cursor-delete");
     }
 
     return false;
@@ -1658,7 +1658,18 @@ private:
         return ic->propertyFor(deps_.factory);
     }
 
-    void clearComposeState(NonPreeditDeltaRewriteState &nonPreeditState) const {
+   void clearComposeState(NonPreeditDeltaRewriteState &nonPreeditState,
+                       const char *reason = "unknown") const {
+        
+        if (deps_.debugEnabled && deps_.debugEnabled()) {
+            FCITX_INFO() << "openkey: nonPreedit clear"
+                        << " reason=" << reason
+                        << " shown=" << nonPreeditState.shownText
+                        << " pending=" << nonPreeditState.nonPreeditKeys.size()
+                        << " rewriteLock=" << nonPreeditState.rewriteLock
+                        << " waitingAck=" << nonPreeditState.waitingBackspaceAck
+                        << " remotePending=" << nonPreeditState.remoteRewritePending;
+        }
         nonPreeditState.shownText.clear();
         nonPreeditState.hasRewrittenCurrentWord = false;
         nonPreeditState.rewriteLock = false;
@@ -1715,7 +1726,7 @@ private:
         }
         if (!fcitx::utf8::validate(nonPreeditState.shownText) ||
             !fcitx::utf8::validate(newWord)) {
-            clearComposeState(nonPreeditState);
+            clearComposeState(nonPreeditState, "invalid-utf8");
             return false;
         }
 
@@ -1793,7 +1804,7 @@ private:
             nonPreeditState.pendingShownTextAfterCommit.clear();
         }
 
-        clearComposeState(nonPreeditState);
+        clearComposeState(nonPreeditState, "default");
         return false;
     }
 
@@ -1804,17 +1815,17 @@ private:
         auto &nonPreeditState = state.nonPreeditDelta;
         const RewriteTiming timing = nonPreeditTimingFor(ic, state.program);
         if (hasCtrlAltSuperMeta(nonPreeditKey)) {
-            clearComposeState(nonPreeditState);
+           clearComposeState(nonPreeditState, "ctrl-alt-super");
             return false;
         }
 
         if (nonPreeditKey.isCursorMove() || nonPreeditKey.check(FcitxKey_Delete)) {
-            clearComposeState(nonPreeditState);
+           clearComposeState(nonPreeditState, "cursor-delete");
             return false;
         }
 
         if (nonPreeditKey.check(FcitxKey_Escape)) {
-            clearComposeState(nonPreeditState);
+           clearComposeState(nonPreeditState, "escape");
             return false;
         }
 
@@ -1823,7 +1834,7 @@ private:
                 return false;
             }
             if (!nonPreeditState.hasRewrittenCurrentWord) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "backspace-empty-or-not-rewritten");           
                 return false;
             }
             const auto method = deps_.backspaceInjector->sendBackspaces(
@@ -1848,32 +1859,32 @@ private:
                 nonPreeditKey.check(FcitxKey_KP_Enter) ||
                 nonPreeditKey.check(FcitxKey_ISO_Enter) ||
                 nonPreeditKey.check(FcitxKey_Tab)) {
-                clearComposeState(nonPreeditState);
+               clearComposeState(nonPreeditState, "boundary");
                 return false;
             }
 
             // Only composing chars go to the engine.
             // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
             if (!isComposingASCII(c)) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "not-composing-ascii");
                 return false;
             }
 
             if (!adapterShared) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "no-adapter");
                 return false;
             }
             adapterShared->setCodeTable(state.codeTable);
             const auto r =
                 adapterShared->processAsciiKey(nonPreeditState.shownText, c);
             if (!r.handled) {
-                clearComposeState(nonPreeditState);
+                clearComposeState(nonPreeditState, "adapter-not-handled");
                 return false;
             }
             return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
-        clearComposeState(nonPreeditState);
+       clearComposeState(nonPreeditState, "non-ascii-key");
         return false;
     }
 

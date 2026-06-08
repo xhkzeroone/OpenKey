@@ -203,7 +203,15 @@ struct NonPreeditDeltaRewriteState {
     uint64_t remotePendingTxId = 0;
     bool remoteRewritePending = false;
 
+    bool hasRemoteRewritePending() const {
+        return remoteRewritePending || remotePendingTxId != 0;
+    }
+
     void clear() {
+        if (hasRemoteRewritePending()) {
+            return;
+        }
+
         shownText.clear();
         hasRewrittenCurrentWord = false;
         rewriteLock = false;
