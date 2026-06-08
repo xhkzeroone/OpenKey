@@ -590,19 +590,18 @@ struct DeltaRewriteTiming {
 
 // Delta timing tuned based on NonPreedit values
 // Format: {interKeyUsec, commitDelayUsec}
-static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 30000};
-static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{2000, 60000};
-static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{2000, 60000};
-static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{2000, 60000};
+static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 50000};
+static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 100000};
+static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 100000};
+static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
 
-static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 30000};
-static constexpr RewriteTiming kNonPreeditX11Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditWaylandFcitx4Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditX11Fcitx4Timing{2000, 60000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{2000, 60000};
+static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 50000};
+static constexpr RewriteTiming kNonPreeditX11Timing{1000, 50000};
+static constexpr RewriteTiming kNonPreeditFcitx4Timing{1000, 100000};
+static constexpr RewriteTiming kNonPreeditX11BrowserTiming{1000, 50000};
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -830,15 +829,14 @@ static RewriteTiming nonPreeditTimingFor(fcitx::InputContext *ic,
     const bool x11 = isRunningOnX11(ic);
     const bool fcitx4 = isFcitx4Frontend(ic);
 
-    if (x11 && fcitx4) {
-        return kNonPreeditX11Fcitx4Timing;
+    if (fcitx4) {
+        return kNonPreeditFcitx4Timing;
     }
-    if (!x11 && fcitx4) {
-        return kNonPreeditWaylandFcitx4Timing;
-    }
+
     if (x11 && isBrowserLikeProgram(program)) {
         return kNonPreeditX11BrowserTiming;
     }
+
     if (x11) {
         return kNonPreeditX11Timing;
     }
