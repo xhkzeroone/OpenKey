@@ -151,6 +151,7 @@ enum class RuntimeMode {
     BackspaceRewriteDelta,
     NonPreeditBackspaceRewrite,
     SurroundingText,
+    BrowserWayland,
     Preedit,
     DirectCommit,
 };
@@ -261,7 +262,6 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     bool manualMode = false;
     bool modeDecided = false;
     std::string program;
-    int surroundingFailures = 0;
     int codeTable = 0;
 };
 
@@ -308,6 +308,7 @@ private:
 
     std::unique_ptr<InputModeHandler> preeditHandler_;
     std::unique_ptr<InputModeHandler> surroundingTextHandler_;
+    std::unique_ptr<InputModeHandler> browserWaylandHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
     std::unique_ptr<InputModeHandler> nonPreeditBackspaceRewriteHandler_;
 
@@ -326,6 +327,7 @@ private:
 
     RuntimeMode decideMode(fcitx::InputContext *ic, OpenKeyState &state,
                              bool writeBack = true);
+    RuntimeMode firstManualMode() const;
     bool handleBackspaceRewrite(fcitx::InputContext *ic,
                                 fcitx::KeyEvent &event, OpenKeyState &state);
     bool scheduleRemoteNonPreeditRewrite(fcitx::InputContext *ic, OpenKeyState &state,
