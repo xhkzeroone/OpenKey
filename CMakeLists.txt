@@ -121,6 +121,8 @@ if(GO_EXECUTABLE)
     )
 endif()
 
+
+
 install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"

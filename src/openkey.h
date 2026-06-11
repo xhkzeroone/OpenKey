@@ -175,11 +175,14 @@ public:
     void save() override;
     const fcitx::Configuration *getConfig() const override;
     void setConfig(const fcitx::RawConfig &config) override;
+    const fcitx::Configuration *getSubConfig(const std::string &path) const override;
+    void setSubConfig(const std::string &path, const fcitx::RawConfig &config) override;
 
 private:
     fcitx::Instance *instance_;
     std::shared_ptr<void> lifetime_;
     OpenKeyConfig config_;
+    OpenKeyMacroTable macroTables_;
 
     std::unordered_map<std::string, RuntimeMode> x11AppModeMap_;
     std::unordered_map<std::string, RuntimeMode> waylandAppModeMap_;

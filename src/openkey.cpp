@@ -2592,6 +2592,8 @@ void OpenKeyEngine::setConfig(const fcitx::RawConfig &config) {
 void OpenKeyEngine::reloadConfig() {
     fcitx::readAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                      "conf/openkey.conf");
+    fcitx::readAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
+                     "conf/openkey-macro-table.conf");
     loadAppModes();
     applyConfig();
 }
@@ -2617,19 +2619,51 @@ void OpenKeyEngine::applyConfig() {
     adapter_->setTempOffSpelling(false);
     adapter_->setTempOffOpenKey(false);
 
-    // (Re)load macro file if enabled.
+    // (Re)load macro table if enabled.
     initMacroMap(nullptr, 0);
-    if (config_.enableMacro.value() && !config_.macroFile.value().empty()) {
-        readFromFile(config_.macroFile.value(), false);
+    if (config_.enableMacro.value()) {
+        for (const auto &keymap : macroTables_.macros.value()) {
+            if (!keymap.key.value().empty()) {
+                addMacro(keymap.key.value(), keymap.value.value());
+            }
+        }
     }
 }
 
 void OpenKeyEngine::persistConfig() {
     fcitx::safeSaveAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                          "conf/openkey.conf");
+    fcitx::safeSaveAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
+                         "conf/openkey-macro-table.conf");
 }
 
 void OpenKeyEngine::save() { persistConfig(); }
+
+const fcitx::Configuration *
+OpenKeyEngine::getSubConfig(const std::string &path) const {
+    if (path == "openkey-macro") {
+        return &macroTables_;
+    }
+    return nullptr;
+}
+
+void OpenKeyEngine::setSubConfig(const std::string &path,
+                                 const fcitx::RawConfig &config) {
+    if (path == "openkey-macro") {
+        macroTables_.load(config, true);
+        fcitx::safeSaveAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
+                             "conf/openkey-macro-table.conf");
+        // Reload macros in memory
+        initMacroMap(nullptr, 0);
+        if (config_.enableMacro.value()) {
+            for (const auto &keymap : macroTables_.macros.value()) {
+                if (!keymap.key.value().empty()) {
+                    addMacro(keymap.key.value(), keymap.value.value());
+                }
+            }
+        }
+    }
+}
 
 void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {

@@ -28,6 +28,25 @@ FCITX_CONFIG_ENUM_NAME_WITH_I18N(CodeTable, N_("Unicode"),
                                  N_("Vietnamese Locale CP 1258"));
 
 FCITX_CONFIGURATION(
+    OpenKeyMacroItem,
+    fcitx::Option<std::string> key{this, "Key", N_("Từ viết tắt"), ""};
+    fcitx::Option<std::string> value{this, "Value", N_("Cụm từ thay thế"), ""};
+);
+
+FCITX_CONFIGURATION(
+    OpenKeyMacroTable,
+    fcitx::OptionWithAnnotation<std::vector<OpenKeyMacroItem>,
+                                fcitx::ListDisplayOptionAnnotation>
+        macros{this,
+               "Macro",
+               N_("Danh sách gõ tắt"),
+               {},
+               fcitx::NoConstrain<std::vector<OpenKeyMacroItem>>(),
+               fcitx::DefaultMarshaller<std::vector<OpenKeyMacroItem>>(),
+               fcitx::ListDisplayOptionAnnotation("Key")};
+);
+
+FCITX_CONFIGURATION(
     OpenKeyConfig,
     fcitx::OptionWithAnnotation<InputType, InputTypeI18NAnnotation>
         inputType{this, "InputType", N_("Kiểu gõ"), InputType::Telex};
@@ -47,8 +66,8 @@ FCITX_CONFIGURATION(
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
     fcitx::Option<bool> allowConsonantZFWJ{
         this, "AllowConsonantZFWJ", N_("Cho phép gõ phụ âm Z, F, W, J"), true};
-    fcitx::Option<std::string> macroFile{
-        this, "MacroFile", N_("Đường dẫn tệp gõ tắt"), ""};
+    fcitx::SubConfigOption macroEditor{
+        this, "MacroEditor", N_("Trình chỉnh sửa gõ tắt"), "fcitx://config/addon/openkey/openkey-macro"};
     fcitx::Option<bool> debug{this, "Debug", N_("Ghi nhật ký gỡ lỗi (debug)"), false};
     fcitx::KeyListOption switchModeKey{
         this,
