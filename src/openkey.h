@@ -7,15 +7,14 @@
 #include <vector>
 #include <unordered_set>
 
-#include <fcitx-config/configuration.h>
-#include <fcitx-config/enum.h>
-#include <fcitx-config/option.h>
 #include <fcitx/inputcontextproperty.h>
 #include <fcitx/inputmethodengine.h>
+#include <fcitx/instance.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/capabilityflags.h>
-#include <fcitx-utils/i18n.h>
 #include <fcitx-utils/key.h>
+
+#include "openkey_config.h"
 
 namespace fcitx {
 class Instance;
@@ -36,122 +35,11 @@ public:
     virtual void reset(OpenKeyState &) {}
 };
 
-enum class InputType { Telex, VNI, SimpleTelex1, SimpleTelex2 };
-FCITX_CONFIG_ENUM_NAME_WITH_I18N(InputType, N_("Telex"), N_("VNI"),
-                                 N_("Simple Telex 1"), N_("Simple Telex 2"));
-
-enum class CodeTable { Unicode, TCVN3, VNIWindows };
-FCITX_CONFIG_ENUM_NAME_WITH_I18N(CodeTable, N_("Unicode"),
-                                 N_("TCVN3 (ABC)"),
-                                 N_("VNI Windows"));
-
-FCITX_CONFIGURATION(OpenKeyConfig,
-                    fcitx::KeyListOption
-                        switchModeKey{this,
-                                      "SwitchModeKey",
-                                      N_("Switch composition mode hotkey"),
-                                      {fcitx::Key("Alt+space")},
-                                      fcitx::KeyListConstrain(
-                                          fcitx::KeyConstrainFlag::
-                                              AllowModifierLess)};
-                    fcitx::OptionWithAnnotation<InputType,
-                                                InputTypeI18NAnnotation>
-                        inputType{this,
-                                  "InputType",
-                                  N_("Input Type"),
-                                  InputType::Telex};
-                    fcitx::OptionWithAnnotation<CodeTable,
-                                                CodeTableI18NAnnotation>
-                        codeTable{this,
-                                  "CodeTable",
-                                  N_("Output Code Table"),
-                                  CodeTable::Unicode};
-                    fcitx::Option<bool> freeMark{this,
-                                                 "FreeMark",
-                                                 N_("Free Mark"),
-                                                 true};
-                    fcitx::Option<bool>
-                        checkSpelling{this,
-                                      "CheckSpelling",
-                                      N_("Spell Check"),
-                                      true};
-                    fcitx::Option<bool>
-                        useModernOrthography{this,
-                                             "UseModernOrthography",
-                                             N_("Use modern orthography (oà, uý)"),
-                                             true};
-                    fcitx::Option<bool>
-                        quickTelex{this,
-                                  "QuickTelex",
-                                  N_("Quick Telex (cc=ch, gg=gi, ...)"),
-                                  false};
-                    fcitx::Option<bool>
-                        restoreIfWrongSpelling{this,
-                                               "RestoreIfWrongSpelling",
-                                               N_("Restore key on wrong spelling"),
-                                               false};
-                    fcitx::Option<bool>
-                        upperCaseFirstChar{this,
-                                           "UpperCaseFirstChar",
-                                           N_("Uppercase first letter after sentence"),
-                                           false};
-                    fcitx::Option<bool>
-                        allowConsonantZFWJ{this,
-                                           "AllowConsonantZFWJ",
-                                           N_("Allow consonants z, w, j, f"),
-                                           true};
-                    fcitx::Option<bool>
-                        quickStartConsonant{this,
-                                           "QuickStartConsonant",
-                                           N_("Quick start consonant (f->ph, j->gi, w->qu)"),
-                                           false};
-                    fcitx::Option<bool>
-                        quickEndConsonant{this,
-                                         "QuickEndConsonant",
-                                         N_("Quick end consonant (g->ng, h->nh, k->ch)"),
-                                         false};
-                    fcitx::Option<bool>
-                        otherLanguage{this,
-                                     "OtherLanguage",
-                                     N_("Disable Vietnamese in other languages"),
-                                     false};
-                    fcitx::Option<bool>
-                        tempOffSpelling{this,
-                                        "TempOffSpelling",
-                                        N_("Temporarily toggle spell check with Ctrl"),
-                                        false};
-                    fcitx::Option<bool>
-                        tempOffOpenKey{this,
-                                       "TempOffOpenKey",
-                                       N_("Temporarily toggle OpenKey with Alt"),
-                                       false};
-                    fcitx::Option<bool>
-                        enableMacro{this,
-                                    "EnableMacro",
-                                    N_("Enable macros (shortcuts)"),
-                                    false};
-                    fcitx::Option<bool>
-                        autoCapsMacro{this,
-                                     "AutoCapsMacro",
-                                     N_("Auto-capitalize macro results"),
-                                     false};
-                    fcitx::Option<std::string>
-                        macroFile{this,
-                                  "MacroFile",
-                                  N_("Macro file path"),
-                                  ""};
-                    fcitx::Option<bool>
-                        debug{this,
-                              "Debug",
-                              N_("Debug Logging"),
-                              false};);
-
 enum class RuntimeMode {
     Auto,
     BackspaceRewriteDelta,
     NonPreeditBackspaceRewrite,
     SurroundingText,
-    BrowserWayland,
     Preedit,
     DirectCommit,
 };
@@ -308,7 +196,6 @@ private:
 
     std::unique_ptr<InputModeHandler> preeditHandler_;
     std::unique_ptr<InputModeHandler> surroundingTextHandler_;
-    std::unique_ptr<InputModeHandler> browserWaylandHandler_;
     std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
     std::unique_ptr<InputModeHandler> nonPreeditBackspaceRewriteHandler_;
 

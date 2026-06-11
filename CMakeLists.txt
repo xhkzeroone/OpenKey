@@ -33,6 +33,7 @@ target_include_directories(openkey PRIVATE
 target_sources(openkey PRIVATE
     src/openkey.cpp
     src/openkey.h
+    src/openkey_config.h
     src/openkey-addon.conf.in.in
     src/openkey.conf.in
     src/openkey_adapter.cpp

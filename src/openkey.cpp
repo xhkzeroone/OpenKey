@@ -26,12 +26,10 @@
 
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
-#include <fcitx/action.h>
 #include <fcitx-config/iniparser.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
-#include <fcitx/statusarea.h>
 #include <fcitx/text.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
@@ -534,54 +532,45 @@ static std::string normalizedProgramName(const std::string &program) {
 
 static std::string runtimeModeToString(RuntimeMode mode) {
     switch (mode) {
-    case RuntimeMode::Auto:
-        return "auto";
-    case RuntimeMode::Preedit:
-        return "preedit";
-    case RuntimeMode::SurroundingText:
-        return "surrounding";
-    case RuntimeMode::BackspaceRewriteDelta:
-        return "backspace";
-    case RuntimeMode::NonPreeditBackspaceRewrite:
-        return "nonPreedit";
-    case RuntimeMode::BrowserWayland:
-        return "browserWayland";
-    case RuntimeMode::DirectCommit:
-        return "direct";
+    case RuntimeMode::Auto:           return "auto";
+    case RuntimeMode::Preedit:        return "preedit";
+    case RuntimeMode::SurroundingText:return "surrounding";
+    case RuntimeMode::BackspaceRewriteDelta: return "backspace";
+    case RuntimeMode::NonPreeditBackspaceRewrite: return "nonPreedit";
+    case RuntimeMode::DirectCommit:   return "direct";
     }
     return "auto";
 }
 
 static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
-    if (equalsASCIIInsensitive(mode, "auto")) {
-        out = RuntimeMode::Auto;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "preedit")) {
-        out = RuntimeMode::Preedit;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "surrounding")) {
-        out = RuntimeMode::SurroundingText;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "backspace")) {
-        out = RuntimeMode::BackspaceRewriteDelta;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "nonPreedit")) {
-        out = RuntimeMode::NonPreeditBackspaceRewrite;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "browserWayland")) {
-        out = RuntimeMode::BrowserWayland;
-        return true;
-    }
-    if (equalsASCIIInsensitive(mode, "direct")) {
-        out = RuntimeMode::DirectCommit;
-        return true;
-    }
+    if (equalsASCIIInsensitive(mode, "auto"))        { out = RuntimeMode::Auto; return true; }
+    if (equalsASCIIInsensitive(mode, "preedit"))     { out = RuntimeMode::Preedit; return true; }
+    if (equalsASCIIInsensitive(mode, "surrounding")) { out = RuntimeMode::SurroundingText; return true; }
+    if (equalsASCIIInsensitive(mode, "backspace"))   { out = RuntimeMode::BackspaceRewriteDelta; return true; }
+    if (equalsASCIIInsensitive(mode, "nonPreedit"))  { out = RuntimeMode::NonPreeditBackspaceRewrite; return true; }
+    if (equalsASCIIInsensitive(mode, "direct"))      { out = RuntimeMode::DirectCommit; return true; }
     return false;
+}
+
+static int toOpenKeyInputType(InputType type) {
+    switch (type) {
+    case InputType::Telex:       return 0;
+    case InputType::VNI:         return 1;
+    case InputType::SimpleTelex1:return 2;
+    case InputType::SimpleTelex2:return 3;
+    }
+    return 0;
+}
+
+static int toOpenKeyCodeTable(CodeTable table) {
+    switch (table) {
+    case CodeTable::Unicode:    return 0;
+    case CodeTable::TCVN3:      return 1;
+    case CodeTable::VNIWindows: return 2;
+    case CodeTable::UnicodeCompound: return 3;
+    case CodeTable::VietnameseLocaleCP1258: return 4;
+    }
+    return 0;
 }
 
 struct RewriteTiming {
@@ -761,12 +750,6 @@ static bool isElectronLikeProgram(const std::string &program) {
         }
     }
     return false;
-}
-
-static bool shouldSkipDSTOnWayland(fcitx::InputContext *ic,
-                                   const std::string &program) {
-    return !isRunningOnX11(ic) &&
-           (isBrowserLikeProgram(program) || isElectronLikeProgram(program));
 }
 
 static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
@@ -967,32 +950,6 @@ static unsigned int utf8CharCount(const std::string &s) {
         return 0;
     }
     return static_cast<unsigned int>(fcitx::utf8::length(s));
-}
-
-static int toOpenKeyInputType(InputType type) {
-    switch (type) {
-    case InputType::Telex:
-        return 0;
-    case InputType::VNI:
-        return 1;
-    case InputType::SimpleTelex1:
-        return 2;
-    case InputType::SimpleTelex2:
-        return 3;
-    }
-    return 0;
-}
-
-static int toOpenKeyCodeTable(CodeTable table) {
-    switch (table) {
-    case CodeTable::Unicode:
-        return 0;
-    case CodeTable::TCVN3:
-        return 1;
-    case CodeTable::VNIWindows:
-        return 2;
-    }
-    return 0;
 }
 
 static bool isMacroTriggerKey(char c) {
@@ -1276,14 +1233,6 @@ public:
                          << " rollbackWord=" << state.rollbackWord;
         }
 
-        if (shouldSkipDSTOnWayland(ic, state.program)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-
         if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
             state.macroBuffer.clear();
             state.rollbackWord.clear();
@@ -1498,215 +1447,6 @@ public:
 private:
     SimpleModeHandlerDeps deps_;
 };
-
-// ---------------------------------------------------------------------------
-// BrowserWaylandModeHandler
-// Cơ chế deleteSurroundingText như SurroundingTextModeHandler nhưng:
-// - Không check shouldSkipDSTOnWayland (luôn dùng DST kể cả trên Wayland)
-// - Không có fallback tự động sang preedit
-// Dành cho browser trên Wayland mà user chọn thủ công.
-// ---------------------------------------------------------------------------
-
-class BrowserWaylandModeHandler final : public InputModeHandler {
-public:
-    explicit BrowserWaylandModeHandler(SimpleModeHandlerDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-
-        state.composing.clear();
-
-        const bool debug = deps_.debugEnabled && deps_.debugEnabled();
-
-        if (debug) {
-            FCITX_INFO() << "openkey: bw key program=" << state.program
-                         << " sym=" << key.sym()
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " rollbackWord=" << state.rollbackWord;
-        }
-
-        if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        if (key.check(FcitxKey_BackSpace)) {
-            if (!state.rollbackWord.empty()) {
-                if (!fcitx::utf8::validate(state.rollbackWord) ||
-                    !fcitx::utf8::validate(state.rollbackDisplay)) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    return false;
-                }
-                const auto len = fcitx::utf8::length(state.rollbackWord);
-                if (len > 0) {
-                    auto it = fcitx::utf8::nextNChar(state.rollbackWord.begin(), len - 1);
-                    state.rollbackWord.erase(it, state.rollbackWord.end());
-                } else {
-                    state.rollbackWord.clear();
-                }
-
-                std::string newDisplay = state.rollbackWord;
-                const std::size_t prefixLen =
-                    commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newDisplay);
-                const unsigned int deleteChars =
-                    utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-                if (deleteChars > 128) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    return false;
-                }
-                if (deleteChars > 0) {
-                    ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                }
-                if (newDisplay.size() > prefixLen) {
-                    ic->commitString(newDisplay.substr(prefixLen));
-                }
-                state.rollbackDisplay = std::move(newDisplay);
-                if (debug) {
-                    FCITX_INFO() << "openkey: bw bs program=" << state.program
-                                 << " deleteChars=" << deleteChars
-                                 << " newDisplay=" << state.rollbackDisplay;
-                }
-                event.filterAndAccept();
-                return true;
-            }
-            if (!state.macroBuffer.empty()) {
-                state.macroBuffer.pop_back();
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-            key.check(FcitxKey_ISO_Enter)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-        if (!(uni >= 0x20 && uni <= 0x7E)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = false;
-            return false;
-        }
-        const char c = static_cast<char>(uni);
-
-        if (c == ' ' || c == '\t') {
-            if (deps_.enableMacro && deps_.enableMacro() && !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
-            }
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (!isComposingASCII(c)) {
-            if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
-                !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
-            }
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (state.noSeedNextWord) {
-            state.noSeedNextWord = false;
-        } else if (state.rollbackWord.empty()) {
-            auto &st = ic->surroundingText();
-            if (st.isValid() && st.cursor() == st.anchor()) {
-                WordSegment seg;
-                if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
-                    state.rollbackWord = seg.word;
-                    state.rollbackDisplay = seg.word;
-                    if (debug) {
-                        FCITX_INFO() << "openkey: bw seed program=" << state.program
-                                     << " seed=" << seg.word;
-                    }
-                }
-            }
-        }
-
-        auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
-        if (!r.handled) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            return false;
-        }
-        if (!fcitx::utf8::validate(r.newWord)) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            return false;
-        }
-
-        const std::size_t prefixLen =
-            commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
-        const unsigned int deleteChars =
-            utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-        if (deleteChars > 128) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            return false;
-        }
-        if (deleteChars > 0) {
-            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        }
-        if (r.newWord.size() > prefixLen) {
-            ic->commitString(r.newWord.substr(prefixLen));
-        }
-        if (debug) {
-            FCITX_INFO() << "openkey: bw apply program=" << state.program
-                         << " deleteChars=" << deleteChars
-                         << " commitDelta=" << r.newWord.substr(prefixLen)
-                         << " newWord=" << r.newWord;
-        }
-
-        state.rollbackWord = r.newWord;
-        state.rollbackDisplay = r.newWord;
-        state.lastCommitted = state.rollbackDisplay;
-        event.filterAndAccept();
-        return true;
-    }
-
-    void reset(OpenKeyState &state) override {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.noSeedNextWord = false;
-    }
-
-private:
-    SimpleModeHandlerDeps deps_;
-};
-
 
 class BackspaceRewriteModeHandler final : public InputModeHandler {
 public:
@@ -2627,8 +2367,7 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     simpleDeps.debugEnabled = [this]() { return debugEnabled(); };
     simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
     preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
-    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(simpleDeps);
-    browserWaylandHandler_ = std::make_unique<BrowserWaylandModeHandler>(std::move(simpleDeps));
+    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
     reloadConfig();
     if (remoteNonPreeditCoordinator_) {
         remoteNonPreeditCoordinator_->ensureAvailableOrStartOnce();
@@ -2669,8 +2408,6 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
             return "Auto";
         case RuntimeMode::SurroundingText:
             return "Non Preedit (Gtk Only)";
-        case RuntimeMode::BrowserWayland:
-            return "Non Preedit (Browser on Wayland)";
         case RuntimeMode::Preedit:
             return "Preedit";
         case RuntimeMode::BackspaceRewriteDelta:
@@ -2702,8 +2439,6 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
         return "Auto";
     case RuntimeMode::SurroundingText:
         return "Non Preedit (Gtk Only)";
-    case RuntimeMode::BrowserWayland:
-        return "Non Preedit (Browser on Wayland)";
     case RuntimeMode::Preedit:
         return "Preedit";
     case RuntimeMode::BackspaceRewriteDelta:
@@ -2727,7 +2462,6 @@ bool OpenKeyEngine::debugEnabled() const {
 bool OpenKeyEngine::nonPreeditServerAvailable() {
     return remoteNonPreeditCoordinator_ && remoteNonPreeditCoordinator_->available();
 }
-
 
 void OpenKeyEngine::loadAppModes() {
     auto loadOne = [](const char *path,
@@ -2868,20 +2602,20 @@ void OpenKeyEngine::applyConfig() {
     adapter_->setCodeTable(toOpenKeyCodeTable(config_.codeTable.value()));
     adapter_->setCheckSpelling(config_.checkSpelling.value());
     adapter_->setUseModernOrthography(config_.useModernOrthography.value());
-    adapter_->setQuickTelex(config_.quickTelex.value());
+    adapter_->setQuickTelex(false);
     adapter_->setRestoreIfWrongSpelling(config_.restoreIfWrongSpelling.value());
-    adapter_->setUpperCaseFirstChar(config_.upperCaseFirstChar.value());
+    adapter_->setUpperCaseFirstChar(false);
     adapter_->setAllowConsonantZFWJ(config_.allowConsonantZFWJ.value());
-    adapter_->setQuickStartConsonant(config_.quickStartConsonant.value());
-    adapter_->setQuickEndConsonant(config_.quickEndConsonant.value());
+    adapter_->setQuickStartConsonant(false);
+    adapter_->setQuickEndConsonant(false);
     adapter_->setUseMacro(config_.enableMacro.value());
     adapter_->setUseMacroInEnglishMode(false);
-    adapter_->setAutoCapsMacro(config_.autoCapsMacro.value());
+    adapter_->setAutoCapsMacro(false);
     adapter_->setUseSmartSwitchKey(false);
     adapter_->setRememberCode(false);
-    adapter_->setOtherLanguage(config_.otherLanguage.value());
-    adapter_->setTempOffSpelling(config_.tempOffSpelling.value());
-    adapter_->setTempOffOpenKey(config_.tempOffOpenKey.value());
+    adapter_->setOtherLanguage(false);
+    adapter_->setTempOffSpelling(false);
+    adapter_->setTempOffOpenKey(false);
 
     // (Re)load macro file if enabled.
     initMacroMap(nullptr, 0);
@@ -3035,8 +2769,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         if (!state->manualMode) {
             nextMode = RuntimeMode::NonPreeditBackspaceRewrite;
         } else if (state->mode == RuntimeMode::NonPreeditBackspaceRewrite) {
-            nextMode = RuntimeMode::BrowserWayland;
-        } else if (state->mode == RuntimeMode::BrowserWayland) {
             nextMode = RuntimeMode::BackspaceRewriteDelta;
         } else if (state->mode == RuntimeMode::BackspaceRewriteDelta) {
             nextMode = RuntimeMode::SurroundingText;
@@ -3103,14 +2835,12 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                     return "Auto";
                 case RuntimeMode::SurroundingText:
                     return "Non Preedit (Gtk Only)";
-                case RuntimeMode::BrowserWayland:
-                    return "Non Preedit (Browser on Wayland)";
                 case RuntimeMode::Preedit:
                     return "Preedit";
                 case RuntimeMode::BackspaceRewriteDelta:
                     return "Non Preedit";
                 case RuntimeMode::NonPreeditBackspaceRewrite:
-                    return "Non Preedit 2";
+                    return "Non Preedit (Non Server)";
                 case RuntimeMode::DirectCommit:
                     return "Direct";
                 }
@@ -3197,12 +2927,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         adapter_->setCodeTable(state->codeTable);
         if (surroundingTextHandler_) {
             surroundingTextHandler_->handleKey(ic, event, *state);
-        }
-        return;
-    case RuntimeMode::BrowserWayland:
-        adapter_->setCodeTable(state->codeTable);
-        if (browserWaylandHandler_) {
-            browserWaylandHandler_->handleKey(ic, event, *state);
         }
         return;
     }
