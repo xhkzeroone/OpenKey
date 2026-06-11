@@ -57,6 +57,7 @@ void OpenKeyAdapter::setCodeTable(int codeTable) {
 }
 void OpenKeyAdapter::setCheckSpelling(bool checkSpelling) {
     vCheckSpelling = checkSpelling ? 1 : 0;
+    vSetCheckSpelling();
 }
 void OpenKeyAdapter::setUseModernOrthography(bool enabled) {
     vUseModernOrthography = enabled ? 1 : 0;
@@ -290,6 +291,52 @@ bool OpenKeyAdapter::expandMacro(const std::string &asciiWord,
         return false;
     }
     outReplacement = std::move(out);
+    return true;
+}
+
+bool OpenKeyAdapter::restoreOnWordBreak(const std::string &currentWord,
+                                        char breakChar,
+                                        std::string &outRestoredWord) const {
+    if (currentWord.empty() || !fcitx::utf8::validate(currentWord)) {
+        return false;
+    }
+
+    auto internalWord = encodeWordToInternal(currentWord);
+    if (internalWord.empty()) {
+        return false;
+    }
+    if (internalWord.size() > MAX_BUFF) {
+        internalWord.resize(MAX_BUFF);
+    }
+
+    auto it = _characterMap.find(static_cast<uint32_t>(
+        static_cast<unsigned char>(breakChar)));
+    if (it == _characterMap.end()) {
+        return false;
+    }
+
+    vSetCurrentWord(internalWord.data(), static_cast<Uint8>(internalWord.size()));
+
+    const uint32_t internalKey = it->second;
+    const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
+    const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
+    vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
+                    capsStatus, false);
+
+    if (hookState_->code != vRestore &&
+        hookState_->code != vRestoreAndStartNewSession) {
+        return false;
+    }
+
+    std::string restored =
+        utf8DropLastN(currentWord, hookState_->backspaceCount);
+    for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+        restored += engineCodeToUTF8(hookState_->charData[i]);
+    }
+    if (!fcitx::utf8::validate(restored)) {
+        return false;
+    }
+    outRestoredWord = std::move(restored);
     return true;
 }
 

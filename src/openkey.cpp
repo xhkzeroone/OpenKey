@@ -1038,6 +1038,8 @@ struct DeltaModeDeps {
     BackspaceInjector *backspaceInjector = nullptr;
     std::weak_ptr<void> lifetimeWeak;
     std::function<bool()> debugEnabled;
+    std::function<bool()> enableMacro;
+    std::function<bool()> restoreIfWrongSpelling;
     std::function<bool()> nonPreeditRemoteEnabled;
     std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
                        uint64_t, uint64_t)>
@@ -1049,6 +1051,7 @@ struct SimpleModeHandlerDeps {
     std::shared_ptr<OpenKeyAdapter> adapter;
     std::function<bool()> debugEnabled;
     std::function<bool()> enableMacro;
+    std::function<bool()> restoreIfWrongSpelling;
 };
 
 // ---------------------------------------------------------------------------
@@ -1125,26 +1128,46 @@ public:
             return false;
         }
 
+        auto expandMacroBeforeBoundary = [&](char trigger) {
+            if (!deps_.enableMacro || !deps_.enableMacro() ||
+                !isMacroTriggerKey(trigger) || state.composing.empty()) {
+                return false;
+            }
+            std::string replacement;
+            if (!deps_.adapter->expandMacro(state.composing, replacement)) {
+                return false;
+            }
+            state.composing = std::move(replacement);
+            return true;
+        };
+
+        auto restoreBeforeBoundary = [&](char trigger) {
+            if (!deps_.restoreIfWrongSpelling ||
+                !deps_.restoreIfWrongSpelling() || state.composing.empty()) {
+                return false;
+            }
+            std::string restoredWord;
+            if (!deps_.adapter->restoreOnWordBreak(state.composing, trigger,
+                                                   restoredWord)) {
+                return false;
+            }
+            state.composing = std::move(restoredWord);
+            return true;
+        };
+
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
             if (c == ' ') {
-                if (deps_.enableMacro && deps_.enableMacro() && !state.composing.empty()) {
-                    std::string replacement;
-                    if (deps_.adapter->expandMacro(state.composing, replacement)) {
-                        state.composing = std::move(replacement);
-                    }
+                if (!expandMacroBeforeBoundary(c)) {
+                    restoreBeforeBoundary(c);
                 }
                 return commitPreeditAndMaybeAppend(" ");
             }
             if (!isComposingASCII(c)) {
                 const std::string boundaryUtf8 = fcitx::Key::keySymToUTF8(key.sym());
-                if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
-                    !state.composing.empty()) {
-                    std::string replacement;
-                    if (deps_.adapter->expandMacro(state.composing, replacement)) {
-                        state.composing = std::move(replacement);
-                    }
+                if (!expandMacroBeforeBoundary(c)) {
+                    restoreBeforeBoundary(c);
                 }
                 if (!boundaryUtf8.empty()) {
                     return commitPreeditAndMaybeAppend(boundaryUtf8);
@@ -1330,16 +1353,48 @@ public:
             }
         }
 
+        auto replaceRollbackDisplay = [&](const std::string &replacement) {
+            const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
+            if (deleteChars == 0 || deleteChars > 128) {
+                return false;
+            }
+            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+            ic->commitString(replacement);
+            state.rollbackWord = replacement;
+            state.rollbackDisplay = replacement;
+            state.lastCommitted = replacement;
+            return true;
+        };
+
+        auto expandMacroBeforeBoundary = [&](char trigger) {
+            if (!deps_.enableMacro || !deps_.enableMacro() ||
+                !isMacroTriggerKey(trigger) || state.rollbackDisplay.empty()) {
+                return false;
+            }
+            std::string replacement;
+            if (!deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
+                return false;
+            }
+            return replaceRollbackDisplay(replacement);
+        };
+
+        auto restoreBeforeBoundary = [&](char trigger) {
+            if (!deps_.restoreIfWrongSpelling ||
+                !deps_.restoreIfWrongSpelling() ||
+                state.rollbackDisplay.empty()) {
+                return false;
+            }
+            std::string restoredWord;
+            if (!deps_.adapter->restoreOnWordBreak(state.rollbackDisplay,
+                                                   trigger, restoredWord)) {
+                return false;
+            }
+            return replaceRollbackDisplay(restoredWord);
+        };
+
         if (c == ' ' || c == '\t') {
-            if (deps_.enableMacro && deps_.enableMacro() && !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
+            if (!expandMacroBeforeBoundary(c)) {
+                restoreBeforeBoundary(c);
             }
             state.macroBuffer.clear();
             state.rollbackWord.clear();
@@ -1349,16 +1404,8 @@ public:
         }
 
         if (!isComposingASCII(c)) {
-            if (deps_.enableMacro && deps_.enableMacro() && isMacroTriggerKey(c) &&
-                !state.rollbackDisplay.empty()) {
-                std::string replacement;
-                if (deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                    const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-                    if (deleteChars > 0 && deleteChars <= 128) {
-                        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                        ic->commitString(replacement);
-                    }
-                }
+            if (!expandMacroBeforeBoundary(c)) {
+                restoreBeforeBoundary(c);
             }
             state.macroBuffer.clear();
             state.rollbackWord.clear();
@@ -1763,7 +1810,8 @@ private:
 
     bool applyWordDelta(fcitx::InputContext *ic, OpenKeyState &state,
                         bool debug, const std::string &newWord, char asciiChar,
-                        const char *reason) {
+                        const char *reason,
+                        bool compareWithRawAppend = true) {
         auto &deltaState = state.delta;
         if (!deps_.backspaceInjector) {
             return false;
@@ -1775,7 +1823,8 @@ private:
         }
 
         const std::string oldShown = deltaState.shownText;
-        const std::string rawAppend = oldShown + asciiChar;
+        const std::string rawAppend =
+            compareWithRawAppend ? oldShown + asciiChar : oldShown;
         const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
         const std::size_t prefixLen =
             commonPrefixBytesUTF8Boundary(deltaState.shownText, newWord);
@@ -1844,6 +1893,70 @@ private:
         return false;
     }
 
+    bool maybeExpandMacroBeforeBoundary(fcitx::InputContext *ic,
+                                        OpenKeyState &state,
+                                        const fcitx::Key &boundaryKey,
+                                        std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                        bool debug, char trigger) {
+        auto &deltaState = state.delta;
+        if (!deps_.enableMacro || !deps_.enableMacro() || !adapterShared ||
+            !isMacroTriggerKey(trigger) || deltaState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string replacement;
+        if (!adapterShared->expandMacro(deltaState.shownText, replacement)) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, replacement, trigger, "macro",
+                            false)) {
+            return false;
+        }
+
+        if (deltaState.hasPendingRewrite()) {
+            deltaState.queuedKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearWordState(deltaState);
+        }
+        return true;
+    }
+
+    bool maybeRestoreBeforeBoundary(fcitx::InputContext *ic,
+                                    OpenKeyState &state,
+                                    const fcitx::Key &boundaryKey,
+                                    std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                    bool debug, char trigger) {
+        auto &deltaState = state.delta;
+        if (!deps_.restoreIfWrongSpelling ||
+            !deps_.restoreIfWrongSpelling() || !adapterShared ||
+            deltaState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string restoredWord;
+        if (!adapterShared->restoreOnWordBreak(deltaState.shownText, trigger,
+                                               restoredWord)) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, restoredWord, trigger,
+                            "restore-boundary", false)) {
+            return false;
+        }
+
+        if (deltaState.hasPendingRewrite()) {
+            deltaState.queuedKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearWordState(deltaState);
+        }
+        return true;
+    }
+
     bool processQueuedKey(fcitx::InputContext *ic, OpenKeyState &state,
                           const fcitx::Key &key,
                           std::shared_ptr<OpenKeyAdapter> adapterShared,
@@ -1873,6 +1986,14 @@ private:
             if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
                 key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
                 key.check(FcitxKey_Tab)) {
+                if (maybeExpandMacroBeforeBoundary(ic, state, key, adapterShared,
+                                                   debug, c)) {
+                    return true;
+                }
+                if (maybeRestoreBeforeBoundary(ic, state, key, adapterShared,
+                                               debug, c)) {
+                    return true;
+                }
                 clearWordState(deltaState);
                 return false;
             }
@@ -2135,7 +2256,8 @@ private:
 
     bool applyWordDelta(fcitx::InputContext *ic, OpenKeyState &state,
                         bool debug, const std::string &newWord, char asciiChar,
-                        const char *reason) {
+                        const char *reason,
+                        bool compareWithRawAppend = true) {
         auto &nonPreeditState = state.nonPreeditDelta;
         if (!deps_.backspaceInjector) {
             return false;
@@ -2147,7 +2269,8 @@ private:
         }
 
         const std::string oldShown = nonPreeditState.shownText;
-        const std::string rawAppend = oldShown + asciiChar;
+        const std::string rawAppend =
+            compareWithRawAppend ? oldShown + asciiChar : oldShown;
         const RewriteTiming timing = nonPreeditTimingFor(ic, state.program);
         const std::size_t prefixLen =
             commonPrefixBytesUTF8Boundary(nonPreeditState.shownText, newWord);
@@ -2215,6 +2338,77 @@ private:
         return false;
     }
 
+    bool hasPendingRewrite(const NonPreeditDeltaRewriteState &state) const {
+        return state.rewriteLock || state.waitingBackspaceAck ||
+               !state.pendingConvertedText.empty() ||
+               !state.pendingShownTextAfterCommit.empty() ||
+               state.hasRemoteRewritePending();
+    }
+
+    bool maybeExpandMacroBeforeBoundary(fcitx::InputContext *ic,
+                                        OpenKeyState &state,
+                                        const fcitx::Key &boundaryKey,
+                                        std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                        bool debug, char trigger) {
+        auto &nonPreeditState = state.nonPreeditDelta;
+        if (!deps_.enableMacro || !deps_.enableMacro() || !adapterShared ||
+            !isMacroTriggerKey(trigger) || nonPreeditState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string replacement;
+        if (!adapterShared->expandMacro(nonPreeditState.shownText, replacement)) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, replacement, trigger, "macro",
+                            false)) {
+            return false;
+        }
+
+        if (hasPendingRewrite(nonPreeditState)) {
+            nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearComposeState(nonPreeditState, "macro-boundary");
+        }
+        return true;
+    }
+
+    bool maybeRestoreBeforeBoundary(fcitx::InputContext *ic,
+                                    OpenKeyState &state,
+                                    const fcitx::Key &boundaryKey,
+                                    std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                    bool debug, char trigger) {
+        auto &nonPreeditState = state.nonPreeditDelta;
+        if (!deps_.restoreIfWrongSpelling ||
+            !deps_.restoreIfWrongSpelling() || !adapterShared ||
+            nonPreeditState.shownText.empty()) {
+            return false;
+        }
+
+        adapterShared->setCodeTable(state.codeTable);
+        std::string restoredWord;
+        if (!adapterShared->restoreOnWordBreak(nonPreeditState.shownText,
+                                               trigger, restoredWord)) {
+            return false;
+        }
+
+        if (!applyWordDelta(ic, state, debug, restoredWord, trigger,
+                            "restore-boundary", false)) {
+            return false;
+        }
+
+        if (hasPendingRewrite(nonPreeditState)) {
+            nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
+        } else {
+            ic->forwardKey(boundaryKey);
+            clearComposeState(nonPreeditState, "restore-boundary");
+        }
+        return true;
+    }
+
     bool processNonPreeditKey(fcitx::InputContext *ic, OpenKeyState &state,
                           const fcitx::Key &nonPreeditKey,
                           std::shared_ptr<OpenKeyAdapter> adapterShared,
@@ -2265,6 +2459,14 @@ private:
                 nonPreeditKey.check(FcitxKey_KP_Enter) ||
                 nonPreeditKey.check(FcitxKey_ISO_Enter) ||
                 nonPreeditKey.check(FcitxKey_Tab)) {
+                if (maybeExpandMacroBeforeBoundary(ic, state, nonPreeditKey,
+                                                   adapterShared, debug, c)) {
+                    return true;
+                }
+                if (maybeRestoreBeforeBoundary(ic, state, nonPreeditKey,
+                                               adapterShared, debug, c)) {
+                    return true;
+                }
                clearComposeState(nonPreeditState, "boundary");
                 return false;
             }
@@ -2338,6 +2540,10 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     deltaDeps.backspaceInjector = &g_backspaceInjector;
     deltaDeps.lifetimeWeak = lifetime_;
     deltaDeps.debugEnabled = [this]() { return debugEnabled(); };
+    deltaDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
+    deltaDeps.restoreIfWrongSpelling = [this]() {
+        return config_.restoreIfWrongSpelling.value();
+    };
     backspaceRewriteHandler_ =
         std::make_unique<BackspaceRewriteModeHandler>(std::move(deltaDeps));
     DeltaModeDeps nonPreeditDeltaDeps;
@@ -2347,6 +2553,12 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     nonPreeditDeltaDeps.backspaceInjector = &g_backspaceInjector;
     nonPreeditDeltaDeps.lifetimeWeak = lifetime_;
     nonPreeditDeltaDeps.debugEnabled = [this]() { return debugEnabled(); };
+    nonPreeditDeltaDeps.enableMacro = [this]() {
+        return config_.enableMacro.value();
+    };
+    nonPreeditDeltaDeps.restoreIfWrongSpelling = [this]() {
+        return config_.restoreIfWrongSpelling.value();
+    };
     nonPreeditDeltaDeps.nonPreeditRemoteEnabled = [this]() {
         return remoteNonPreeditCoordinator_ && remoteNonPreeditCoordinator_->enabled();
     };
@@ -2366,6 +2578,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     simpleDeps.adapter = adapter_;
     simpleDeps.debugEnabled = [this]() { return debugEnabled(); };
     simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
+    simpleDeps.restoreIfWrongSpelling = [this]() {
+        return config_.restoreIfWrongSpelling.value();
+    };
     preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
     surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
     reloadConfig();

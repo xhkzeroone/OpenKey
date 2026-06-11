@@ -46,6 +46,12 @@ public:
     bool expandMacro(const std::string &asciiWord,
                      std::string &outReplacement) const;
 
+    // Try the core "restore wrong spelling on word break" path.
+    // Returns only the restored word; the caller still owns forwarding the
+    // actual word-break key.
+    bool restoreOnWordBreak(const std::string &currentWord, char breakChar,
+                            std::string &outRestoredWord) const;
+
     // Convert a full raw ASCII Telex/VNI buffer into Vietnamese UTF-8.
     // This feeds characters into OpenKey core sequentially.
     std::string convertRawBuffer(const std::string &rawAscii) const;
