@@ -387,6 +387,24 @@ Script này phù hợp khi môi trường `fcitx5` trên máy đã rối từ tr
 ./scripts/uninstall.sh
 ```
 
+Nếu `OpenKey` vẫn còn hiện trong `fcitx5-configtool`, có thể máy còn bản cũ ở `/usr/local` hoặc `~/.local`. Chạy:
+
+```bash
+./scripts/uninstall.sh --all-prefixes --reset-openkey-config
+```
+
+Nếu bạn từng cài GNOME Shell bridge extension và cũng muốn gỡ nó:
+
+```bash
+./scripts/uninstall.sh --remove-gnome-extension
+```
+
+Bạn có thể xem trước script sẽ xóa gì bằng:
+
+```bash
+./scripts/uninstall.sh --dry-run --all-prefixes --reset-openkey-config --remove-gnome-extension
+```
+
 Nếu bạn đã cài bằng build khác hoặc prefix khác, xem help:
 
 ```bash

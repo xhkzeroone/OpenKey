@@ -32,63 +32,80 @@ jobs:
   deb:
     runs-on: ubuntu-24.04
     needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - container_image: ubuntu:22.04
+            package_suffix: ubuntu22
+            artifact_name: fcitx5-openkey-deb-ubuntu22
+          - container_image: ubuntu:24.04
+            package_suffix: ubuntu24
+            artifact_name: fcitx5-openkey-deb-ubuntu24
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            pkg-config \
-            extra-cmake-modules \
-            gettext \
-            golang-go \
-            ruby \
-            ruby-dev \
-            fcitx5 \
-            fcitx5-config-qt \
-            fcitx5-frontend-gtk3 \
-            fcitx5-frontend-qt5 \
-            libfcitx5core-dev \
-            libfcitx5config-dev \
-            libfcitx5utils-dev
-          sudo gem install --no-document fpm
-
-      - name: Build staging tree
+      - name: Build .deb in Ubuntu container
         run: |
           rm -rf build-pkg pkgroot dist
-          cmake -S . -B build-pkg \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr
-          cmake --build build-pkg -j"$(nproc)"
-          DESTDIR="$PWD/pkgroot" cmake --install build-pkg --strip
           mkdir -p dist
+          docker run --rm \
+            -e VERSION="$VERSION" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e PACKAGE_SUFFIX="${{ matrix.package_suffix }}" \
+            -v "$PWD:/work" \
+            -w /work \
+            "${{ matrix.container_image }}" \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y \
+                build-essential \
+                cmake \
+                pkg-config \
+                extra-cmake-modules \
+                gettext \
+                golang-go \
+                ruby \
+                ruby-dev \
+                fcitx5 \
+                fcitx5-config-qt \
+                fcitx5-frontend-gtk3 \
+                fcitx5-frontend-qt5 \
+                libfcitx5core-dev \
+                libfcitx5config-dev \
+                libfcitx5utils-dev
+              gem install --no-document fpm
 
-      - name: Build .deb
-        run: |
-          fpm -s dir -t deb \
-            -n fcitx5-openkey \
-            -v "$VERSION" \
-            --architecture amd64 \
-            --description "OpenKey Vietnamese input method for Fcitx5" \
-            --url "https://github.com/open-key/OpenKey" \
-            --license GPL-3.0 \
-            --depends fcitx5 \
-            --depends fcitx5-frontend-gtk3 \
-            --depends fcitx5-frontend-qt5 \
-            -C pkgroot \
-            -p "dist/fcitx5-openkey_${VERSION}_amd64.deb" \
-            .
-          dpkg-deb -c "dist/fcitx5-openkey_${VERSION}_amd64.deb"
+              rm -rf build-pkg pkgroot
+              cmake -S . -B build-pkg \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr
+              cmake --build build-pkg -j"$(nproc)"
+              DESTDIR="$PWD/pkgroot" cmake --install build-pkg --strip
+
+              fpm -s dir -t deb \
+                -n fcitx5-openkey \
+                -v "$VERSION" \
+                --architecture amd64 \
+                --description "OpenKey Vietnamese input method for Fcitx5" \
+                --url "https://github.com/open-key/OpenKey" \
+                --license GPL-3.0 \
+                --depends fcitx5 \
+                --depends fcitx5-frontend-gtk3 \
+                --depends fcitx5-frontend-qt5 \
+                -C pkgroot \
+                -p "dist/fcitx5-openkey_${VERSION}_${PACKAGE_SUFFIX}_amd64.deb" \
+                .
+              dpkg-deb -c "dist/fcitx5-openkey_${VERSION}_${PACKAGE_SUFFIX}_amd64.deb"
+            '
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fcitx5-openkey-deb
-          path: dist/*.deb
+          name: ${{ matrix.artifact_name }}
+          path: dist/*_${{ matrix.package_suffix }}_amd64.deb
           if-no-files-found: error
 
   rpm:
