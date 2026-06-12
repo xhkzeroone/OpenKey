@@ -98,31 +98,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build .rpm in Fedora
+      - name: Build .rpm in Ubuntu container
         run: |
           docker run --rm \
             -e VERSION="$VERSION" \
+            -e DEBIAN_FRONTEND=noninteractive \
             -v "$PWD:/work" \
             -w /work \
-            fedora:latest \
+            ubuntu:24.04 \
             bash -lc '
               set -euo pipefail
-              dnf install -y \
-                ruby \
-                ruby-devel \
-                gcc-c++ \
-                make \
-                rpm-build \
+              apt-get update
+              apt-get install -y \
+                build-essential \
                 cmake \
-                pkgconf-pkg-config \
+                pkg-config \
                 extra-cmake-modules \
                 gettext \
-                golang \
+                golang-go \
+                rpm \
+                ruby \
+                ruby-dev \
                 fcitx5 \
-                fcitx5-configtool \
-                fcitx5-gtk \
-                fcitx5-qt \
-                fcitx5-devel
+                fcitx5-config-qt \
+                fcitx5-frontend-gtk3 \
+                fcitx5-frontend-qt5 \
+                libfcitx5core-dev \
+                libfcitx5config-dev \
+                libfcitx5utils-dev
               gem install --no-document fpm
 
               rm -rf build-pkg pkgroot dist
@@ -133,19 +136,18 @@ jobs:
               DESTDIR="$PWD/pkgroot" cmake --install build-pkg --strip
               mkdir -p dist
 
-              arch="$(uname -m)"
               fpm -s dir -t rpm \
                 -n fcitx5-openkey \
                 -v "$VERSION" \
-                --architecture "$arch" \
+                --architecture x86_64 \
                 --description "OpenKey Vietnamese input method for Fcitx5" \
                 --url "https://github.com/open-key/OpenKey" \
                 --license GPL-3.0 \
                 --depends fcitx5 \
                 -C pkgroot \
-                -p "dist/fcitx5-openkey-${VERSION}.${arch}.rpm" \
+                -p "dist/fcitx5-openkey-${VERSION}.x86_64.rpm" \
                 .
-              rpm -qpl "dist/fcitx5-openkey-${VERSION}.${arch}.rpm"
+              rpm -qpl "dist/fcitx5-openkey-${VERSION}.x86_64.rpm"
             '
 
       - uses: actions/upload-artifact@v4
@@ -154,74 +156,11 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
 
-  arch:
-    runs-on: ubuntu-24.04
-    needs: version
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build pacman package in Arch Linux
-        run: |
-          docker run --rm \
-            -e VERSION="$VERSION" \
-            -v "$PWD:/work" \
-            -w /work \
-            archlinux:latest \
-            bash -lc '
-              set -euo pipefail
-              pacman -Syu --noconfirm
-              pacman -S --needed --noconfirm \
-                base-devel \
-                ruby \
-                cmake \
-                pkgconf \
-                extra-cmake-modules \
-                gettext \
-                go \
-                fcitx5 \
-                fcitx5-configtool \
-                fcitx5-gtk \
-                fcitx5-qt
-              gem install --no-document fpm
-
-              rm -rf build-pkg pkgroot dist
-              cmake -S . -B build-pkg \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_INSTALL_PREFIX=/usr
-              cmake --build build-pkg -j"$(nproc)"
-              DESTDIR="$PWD/pkgroot" cmake --install build-pkg --strip
-              mkdir -p dist
-
-              arch="$(uname -m)"
-              fpm -s dir -t pacman \
-                -n fcitx5-openkey \
-                -v "$VERSION" \
-                --iteration 1 \
-                --architecture "$arch" \
-                --description "OpenKey Vietnamese input method for Fcitx5" \
-                --url "https://github.com/open-key/OpenKey" \
-                --license GPL-3.0 \
-                --depends fcitx5 \
-                -C pkgroot \
-                -p "dist/fcitx5-openkey-${VERSION}-1-${arch}.pkg.tar.zst" \
-                .
-              pacman -Qlp "dist/fcitx5-openkey-${VERSION}-1-${arch}.pkg.tar.zst"
-            '
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fcitx5-openkey-arch
-          path: dist/*.pkg.tar.zst
-          if-no-files-found: error
-
   release:
     runs-on: ubuntu-24.04
     needs:
       - deb
       - rpm
-      - arch
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
@@ -237,4 +176,3 @@ jobs:
             gh release create "$tag" --title "$tag" --notes "Linux packages for $tag"
           fi
           gh release upload "$tag" artifacts/**/* --clobber
-

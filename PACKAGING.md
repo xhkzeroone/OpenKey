@@ -173,8 +173,9 @@ Repo có workflow `.github/workflows/package-linux.yml` để build package Linu
 Workflow tạo:
 
 - `.deb` trên Ubuntu runner.
-- `.rpm` trong Fedora container.
-- `.pkg.tar.zst` trong Arch Linux container.
+- `.rpm` trong Ubuntu container.
+
+Cả `.deb` và `.rpm` đều build kèm helper Go `openkey-nonpreedit-server`.
 
 Chạy thủ công:
 
@@ -186,7 +187,6 @@ Sau khi chạy xong, tải package ở phần `Artifacts` của workflow run:
 
 - `fcitx5-openkey-deb`
 - `fcitx5-openkey-rpm`
-- `fcitx5-openkey-arch`
 
 Nếu push tag dạng `v*`, workflow cũng tự upload package vào GitHub Release cùng tag:
 
