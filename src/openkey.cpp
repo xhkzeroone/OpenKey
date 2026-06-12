@@ -1635,17 +1635,16 @@ private:
     }
 
     void clearWordState(DeltaRewriteState &deltaState) const {
-        if (deltaState.hasPendingRewrite()) {
-            return;
-        }
-
         deltaState.shownText.clear();
         deltaState.rawAsciiBuffer.clear();
         deltaState.hasRewrittenCurrentWord = false;
         deltaState.rewriteLock = false;
         deltaState.waitingBackspaceAck = false;
+        deltaState.processingQueue = false;
         deltaState.expectedBackspaces = 0;
         deltaState.seenBackspaces = 0;
+        deltaState.queuedKeys.clear();
+        deltaState.commitTimer.reset();
         deltaState.ackTimeoutTimer.reset();
         deltaState.pendingConvertedText.clear();
         deltaState.pendingShownTextAfterCommit.clear();
