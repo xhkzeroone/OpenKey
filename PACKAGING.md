@@ -188,11 +188,18 @@ Sau khi chạy xong, tải package ở phần `Artifacts` của workflow run:
 - `fcitx5-openkey-deb`
 - `fcitx5-openkey-rpm`
 
-Nếu push tag dạng `v*`, workflow cũng tự upload package vào GitHub Release cùng tag:
+Nếu push tag dạng `v*` hoặc bắt đầu bằng số, workflow cũng tự upload package vào GitHub Release cùng tag:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
+```
+
+Hoặc:
+
+```bash
+git tag 0.1.0
+git push origin 0.1.0
 ```
 
 Version package được đọc từ dòng `project(fcitx5-openkey VERSION ...)` trong `CMakeLists.txt`.
