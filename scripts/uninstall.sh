@@ -11,15 +11,26 @@ REMOVE_GNOME_EXTENSION=0
 ALL_PREFIXES=0
 DRY_RUN=0
 
+is_user_prefix_value() {
+  local prefix="$1"
+  [[ -n "${HOME:-}" ]] && [[ "$prefix" == "$HOME" || "$prefix" == "$HOME/"* ]]
+}
+
+is_user_prefix() {
+  is_user_prefix_value "$PREFIX"
+}
+
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--build-dir DIR] [--prefix PREFIX] [options]
+Usage: $(basename "$0") [--user] [--build-dir DIR] [--prefix PREFIX] [options]
 
 Uninstalls the fcitx5-openkey addon files installed by CMake.
 Uses build/install_manifest.txt when available, then removes known OpenKey
 paths as a best-effort cleanup.
 
 Options:
+  --user                  Remove the \$HOME/.local install without sudo, matching
+                          install.sh --user.
   --all-prefixes          Also remove known OpenKey files from /usr, /usr/local,
                           and \$HOME/.local. Useful if an old local install still
                           shadows the system install.
@@ -37,6 +48,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --user)
+      PREFIX="${HOME:?HOME is required for --user}/.local"
+      shift 1
+      ;;
     --build-dir)
       BUILD_DIR="${2:?missing value for --build-dir}"
       shift 2
@@ -77,6 +92,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$PREFIX" in
+  "~")
+    PREFIX="${HOME:?HOME is required for ~ prefix}"
+    ;;
+  "~/"*)
+    PREFIX="${HOME:?HOME is required for ~/ prefix}/${PREFIX#"~/"}"
+    ;;
+esac
+
 run_sudo_rm_file() {
   local path="$1"
   [[ -n "$path" ]] || return 0
@@ -115,6 +139,43 @@ run_user_rm_dir() {
     return 0
   fi
   rm -rf -- "$path" || true
+}
+
+run_rm_file_for_path() {
+  local path="$1"
+  if is_user_prefix_value "$path"; then
+    run_user_rm_file "$path"
+  else
+    run_sudo_rm_file "$path"
+  fi
+}
+
+update_icon_cache_for_prefix() {
+  local prefix="$1"
+  local icon_theme_dir="$prefix/share/icons/hicolor"
+
+  if ! command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    return
+  fi
+  if [[ ! -d "$icon_theme_dir" ]]; then
+    return
+  fi
+
+  echo "[openkey] Updating icon cache for prefix: $prefix (optional)"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    if is_user_prefix_value "$prefix"; then
+      echo "  gtk-update-icon-cache -f -t $icon_theme_dir"
+    else
+      echo "  sudo gtk-update-icon-cache -f -t $icon_theme_dir"
+    fi
+    return
+  fi
+
+  if is_user_prefix_value "$prefix"; then
+    gtk-update-icon-cache -f -t "$icon_theme_dir" >/dev/null 2>&1 || true
+  else
+    sudo gtk-update-icon-cache -f -t "$icon_theme_dir" >/dev/null 2>&1 || true
+  fi
 }
 
 stop_running_openkey() {
@@ -230,8 +291,8 @@ report_remaining_openkey_files() {
   fi
 }
 
-echo "[openkey] Checking sudo (you may be prompted for password)"
-if [[ "$DRY_RUN" != "1" ]]; then
+if [[ "$DRY_RUN" != "1" && ( "$ALL_PREFIXES" == "1" || ! is_user_prefix ) ]]; then
+  echo "[openkey] Checking sudo (you may be prompted for password)"
   sudo -v
 fi
 
@@ -242,7 +303,9 @@ if [[ -f "$manifest" ]]; then
   echo "[openkey] Uninstalling using install manifest: $manifest"
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
-    run_sudo_rm_file "$path"
+    if [[ "$ALL_PREFIXES" == "1" || ! is_user_prefix || "$path" == "$PREFIX/"* ]]; then
+      run_rm_file_for_path "$path"
+    fi
   done < "$manifest"
 else
   echo "[openkey] No install manifest found: $manifest"
@@ -257,7 +320,9 @@ fi
 
 PREFIXES=()
 add_unique_prefix "$PREFIX"
-add_unique_prefix "$PKG_PREFIX"
+if [[ "$ALL_PREFIXES" == "1" || ! is_user_prefix ]]; then
+  add_unique_prefix "$PKG_PREFIX"
+fi
 if [[ "$ALL_PREFIXES" == "1" ]]; then
   add_unique_prefix "/usr"
   add_unique_prefix "/usr/local"
@@ -293,7 +358,7 @@ if [[ "$RESET_USER_DATA" == "1" ]]; then
   run_user_rm_dir "$HOME/.cache/fcitx5"
 fi
 
-if [[ -d /etc/udev/rules.d ]]; then
+if [[ ( "$ALL_PREFIXES" == "1" || ! is_user_prefix ) && -d /etc/udev/rules.d ]]; then
   echo "[openkey] Removing udev rule"
   run_sudo_rm_file /etc/udev/rules.d/99-openkey-uinput.rules
   if [[ "$DRY_RUN" != "1" ]] && command -v udevadm >/dev/null 2>&1; then
@@ -302,12 +367,9 @@ if [[ -d /etc/udev/rules.d ]]; then
   fi
 fi
 
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-  echo "[openkey] Updating icon cache (optional)"
-  if [[ "$DRY_RUN" != "1" ]]; then
-    sudo gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
-  fi
-fi
+for prefix in "${PREFIXES[@]}"; do
+  update_icon_cache_for_prefix "$prefix"
+done
 
 echo "[openkey] Restarting fcitx5"
 if [[ "$DRY_RUN" != "1" ]]; then

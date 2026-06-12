@@ -155,6 +155,19 @@ Script này sẽ:
 
 Nếu sau khi chạy script mà vẫn báo `permission denied` với `/dev/uinput`, hãy đăng xuất rồi đăng nhập lại để group mới có hiệu lực.
 
+Nếu muốn cài vào user local giống flow thủ công bên dưới, không ghi vào `/usr`
+và không dùng `sudo` ở bước `cmake --install`, dùng:
+
+```bash
+./scripts/install.sh --user --build-type Release
+```
+
+Gỡ đúng kiểu cài này bằng:
+
+```bash
+./scripts/uninstall.sh --user
+```
+
 ### Cài thủ công cho mọi distro
 
 ```bash
@@ -173,6 +186,14 @@ fcitx5 -rd
 
 ### Cài vào user local, không đụng system-wide
 
+Cách dùng script:
+
+```bash
+./scripts/install.sh --user --build-type Release
+```
+
+Lệnh CMake tương đương:
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build build -j
@@ -183,6 +204,15 @@ fcitx5 -rd
 ### Đóng gói .deb / .rpm
 
 Xem hướng dẫn đóng gói ở [PACKAGING.md](PACKAGING.md).
+
+Khi cài từ `.deb`, dùng package manager để gỡ:
+
+```bash
+sudo apt remove fcitx5-openkey
+```
+
+Không cần chạy `scripts/uninstall.sh` cho bản `.deb`, trừ khi bạn từng cài thêm
+từ source bằng `scripts/install.sh` hoặc `cmake --install`.
 
 ## Bật OpenKey trong Fcitx5
 
@@ -383,8 +413,17 @@ Script này phù hợp khi môi trường `fcitx5` trên máy đã rối từ tr
 
 ## Gỡ cài đặt
 
+Nếu đã cài bằng `./scripts/install.sh` mặc định vào system prefix `/usr`, dùng:
+
 ```bash
 ./scripts/uninstall.sh
+```
+
+Nếu đã cài bằng `./scripts/install.sh --user` hoặc prefix nằm trong `$HOME`,
+dùng:
+
+```bash
+./scripts/uninstall.sh --user
 ```
 
 Nếu `OpenKey` vẫn còn hiện trong `fcitx5-configtool`, có thể máy còn bản cũ ở `/usr/local` hoặc `~/.local`. Chạy:
@@ -392,6 +431,14 @@ Nếu `OpenKey` vẫn còn hiện trong `fcitx5-configtool`, có thể máy còn
 ```bash
 ./scripts/uninstall.sh --all-prefixes --reset-openkey-config
 ```
+
+Nếu đã cài bằng `.deb`, gỡ bằng:
+
+```bash
+sudo apt remove fcitx5-openkey
+```
+
+`scripts/uninstall.sh` chỉ dành cho bản cài từ source bằng script/CMake.
 
 Nếu bạn từng cài GNOME Shell bridge extension và cũng muốn gỡ nó:
 

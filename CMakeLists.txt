@@ -79,26 +79,32 @@ install(
 )
 
 install(
-    FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/scalable/apps/openkey.svg"
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/scalable/apps/fcitx-openkey.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
 )
 install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/scalable/apps/fcitx-openkey.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
+    RENAME "openkey.svg"
 )
 install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/scalable/apps/fcitx-openkey.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
     RENAME "org.fcitx.Fcitx5.fcitx-openkey.svg"
 )
-
 install(
     FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"
 )
 install(
-    FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/openkey-symbolic.svg"
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"
+    RENAME "openkey-symbolic.svg"
+)
+install(
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"
+    RENAME "org.fcitx.Fcitx5.fcitx-openkey-symbolic.svg"
 )
 
 if(GO_EXECUTABLE)
@@ -120,15 +126,6 @@ if(GO_EXECUTABLE)
         DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}"
     )
 endif()
-
-
-
-install(
-    FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/symbolic/apps/fcitx-openkey-symbolic.svg"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/symbolic/apps"
-    RENAME "org.fcitx.Fcitx5.fcitx-openkey-symbolic.svg"
-)
-
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

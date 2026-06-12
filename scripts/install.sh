@@ -8,6 +8,38 @@ PREFIX="${PREFIX:-/usr}"
 BUILD_TYPE="${BUILD_TYPE:-RelWithDebInfo}"
 TARGET_USER="${SUDO_USER:-${USER:-}}"
 
+is_user_prefix() {
+  [[ -n "${HOME:-}" ]] && [[ "$PREFIX" == "$HOME" || "$PREFIX" == "$HOME/"* ]]
+}
+
+cmake_install() {
+  if is_user_prefix; then
+    echo "[openkey] Installing"
+    cmake --install "$BUILD_DIR"
+  else
+    echo "[openkey] Installing (sudo)"
+    sudo cmake --install "$BUILD_DIR"
+  fi
+}
+
+update_icon_cache() {
+  if ! command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    return
+  fi
+
+  local icon_theme_dir="$PREFIX/share/icons/hicolor"
+  if [[ ! -d "$icon_theme_dir" ]]; then
+    return
+  fi
+
+  echo "[openkey] Updating icon cache (optional)"
+  if is_user_prefix; then
+    gtk-update-icon-cache -f -t "$icon_theme_dir" >/dev/null 2>&1 || true
+  else
+    sudo gtk-update-icon-cache -f -t "$icon_theme_dir" >/dev/null 2>&1 || true
+  fi
+}
+
 install_deps_debian() {
   echo "[openkey] Installing build dependencies (apt)"
   sudo apt-get update
@@ -61,6 +93,10 @@ install_build_deps() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --user)
+      PREFIX="${HOME:?HOME is required for --user}/.local"
+      shift
+      ;;
     --prefix)
       PREFIX="${2:?missing value for --prefix}"
       shift 2
@@ -75,12 +111,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--prefix PREFIX] [--build-dir DIR] [--build-type TYPE]
+Usage: $(basename "$0") [--user] [--prefix PREFIX] [--build-dir DIR] [--build-type TYPE]
 
 Environment:
   PREFIX=/usr
   BUILD_DIR=./build
   BUILD_TYPE=RelWithDebInfo
+
+Options:
+  --user  Install to \$HOME/.local without sudo, like the README user-local flow.
 EOF
       exit 0
       ;;
@@ -91,9 +130,22 @@ EOF
   esac
 done
 
+case "$PREFIX" in
+  "~")
+    PREFIX="${HOME:?HOME is required for ~ prefix}"
+    ;;
+  "~/"*)
+    PREFIX="${HOME:?HOME is required for ~/ prefix}/${PREFIX#"~/"}"
+    ;;
+esac
+
 echo "[openkey] Configuring: buildDir=$BUILD_DIR prefix=$PREFIX buildType=$BUILD_TYPE"
 
-install_build_deps
+if is_user_prefix; then
+  echo "[openkey] Skipping dependency auto-install for user-local prefix"
+else
+  install_build_deps
+fi
 
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
@@ -102,10 +154,11 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
 echo "[openkey] Building"
 cmake --build "$BUILD_DIR" -j
 
-echo "[openkey] Installing (sudo)"
-sudo cmake --install "$BUILD_DIR"
+cmake_install
 
-if [[ "$(uname -s)" == "Linux" ]]; then
+if [[ "$(uname -s)" == "Linux" ]] && is_user_prefix; then
+  echo "[openkey] Skipping uinput system setup for user-local prefix"
+elif [[ "$(uname -s)" == "Linux" ]]; then
   if [[ ! -e /dev/uinput ]]; then
     echo "[openkey] /dev/uinput missing; trying: sudo modprobe uinput (best-effort)"
     sudo modprobe uinput >/dev/null 2>&1 || true
@@ -139,10 +192,7 @@ EOF
   fi
 fi
 
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-  echo "[openkey] Updating icon cache (optional)"
-  sudo gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
-fi
+update_icon_cache
 
 echo "[openkey] Restarting fcitx5"
 fcitx5 -rd >/dev/null 2>&1 || true

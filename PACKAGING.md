@@ -119,10 +119,18 @@ fpm -s dir -t deb \
   --depends fcitx5 \
   --depends fcitx5-frontend-gtk3 \
   --depends fcitx5-frontend-qt5 \
+  --depends hicolor-icon-theme \
+  --after-install packaging/debian/postinst \
+  --after-remove packaging/debian/postrm \
   -C pkgroot \
   -p dist/fcitx5-openkey_0.1.0_amd64.deb \
   .
 ```
+
+`postinst` và `postrm` refresh `/usr/share/icons/hicolor` sau khi cài/gỡ
+package để icon OpenKey biến mất/hiện ra ngay hơn. Debian/Ubuntu thường cũng
+có icon-theme trigger từ `hicolor-icon-theme`, nhưng maintainer script này giữ
+package ổn định hơn khi build bằng `fpm`.
 
 Cài thử package:
 
