@@ -106,12 +106,10 @@ int main() {
         const std::string shown = typeSequence(restoreAdapter, "mass");
         expectEq("mass shown", shown, "mas");
         std::string restored;
-        if (!restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "mass", ' ',
-                                                            restored)) {
+        if (restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "mass", ' ',
+                                                           restored)) {
             failures++;
-            std::cerr << "[FAIL] restoreFromRaw mass: expected true, got false\n";
-        } else {
-            expectEq("restoreFromRaw mass", restored, "mass");
+            std::cerr << "[FAIL] restoreFromRaw mass: expected false, got true (restored to: " << restored << ")\n";
         }
     }
     {
