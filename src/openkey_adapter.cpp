@@ -39,8 +39,13 @@ static bool isAsciiHandled(char c) {
 } // namespace
 
 OpenKeyAdapter::OpenKeyAdapter() {
-    hookState_ = static_cast<const vKeyHookState *>(vKeyInit());
+    resetCoreState();
     ensureReverseMap();
+}
+
+void OpenKeyAdapter::resetCoreState() const {
+    hookState_ = static_cast<const vKeyHookState *>(vKeyInit());
+    vSetCurrentWord(nullptr, 0);
 }
 
 void OpenKeyAdapter::setInputType(int inputType) { vInputType = inputType; }
@@ -61,6 +66,9 @@ void OpenKeyAdapter::setCheckSpelling(bool checkSpelling) {
 }
 void OpenKeyAdapter::setUseModernOrthography(bool enabled) {
     vUseModernOrthography = enabled ? 1 : 0;
+}
+void OpenKeyAdapter::setLiteralWAtWordStart(bool enabled) {
+    literalWAtWordStart_ = enabled;
 }
 void OpenKeyAdapter::setQuickTelex(bool enabled) { vQuickTelex = enabled ? 1 : 0; }
 void OpenKeyAdapter::setRestoreIfWrongSpelling(bool enabled) {
@@ -301,6 +309,8 @@ bool OpenKeyAdapter::restoreOnWordBreak(const std::string &currentWord,
         return false;
     }
 
+    resetCoreState();
+
     auto internalWord = encodeWordToInternal(currentWord);
     if (internalWord.empty()) {
         return false;
@@ -333,7 +343,107 @@ bool OpenKeyAdapter::restoreOnWordBreak(const std::string &currentWord,
     for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
         restored += engineCodeToUTF8(hookState_->charData[i]);
     }
-    if (!fcitx::utf8::validate(restored)) {
+    if (!fcitx::utf8::validate(restored) || restored.empty() ||
+        restored == currentWord) {
+        return false;
+    }
+    outRestoredWord = std::move(restored);
+    return true;
+}
+
+bool OpenKeyAdapter::restoreFromRawAsciiOnWordBreak(
+    const std::string &currentWord, const std::string &rawAscii,
+    char breakChar, std::string &outRestoredWord) const {
+    if (currentWord.empty() || rawAscii.empty() ||
+        !fcitx::utf8::validate(currentWord)) {
+        return false;
+    }
+
+    auto breakIt = _characterMap.find(static_cast<uint32_t>(
+        static_cast<unsigned char>(breakChar)));
+    if (breakIt == _characterMap.end()) {
+        return false;
+    }
+
+    const int savedUseMacro = vUseMacro;
+    vUseMacro = 0;
+
+    resetCoreState();
+    std::string replayedWord;
+    bool replayEndedWithRestore = false;
+    for (unsigned char ch : rawAscii) {
+        auto it = _characterMap.find(static_cast<uint32_t>(ch));
+        if (it == _characterMap.end()) {
+            vUseMacro = savedUseMacro;
+            return false;
+        }
+        const uint32_t internalKey = it->second;
+        const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
+        const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
+                        capsStatus, false);
+
+        if (hookState_->code == vDoNothing) {
+            replayedWord.push_back(static_cast<char>(ch));
+        } else if (hookState_->code == vWillProcess ||
+                   hookState_->code == vRestore ||
+                   hookState_->code == vRestoreAndStartNewSession) {
+            replayedWord = utf8DropLastN(replayedWord, hookState_->backspaceCount);
+            for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+                replayedWord += engineCodeToUTF8(hookState_->charData[i]);
+            }
+            if (hookState_->code == vRestore ||
+                hookState_->code == vRestoreAndStartNewSession) {
+                replayEndedWithRestore = true;
+                replayedWord.push_back(static_cast<char>(ch));
+            } else {
+                replayEndedWithRestore = false;
+            }
+        } else {
+            vUseMacro = savedUseMacro;
+            return false;
+        }
+    }
+
+    const uint32_t breakInternalKey = breakIt->second;
+    const Uint16 breakData = static_cast<Uint16>(breakInternalKey & CHAR_MASK);
+    const Uint8 breakCapsStatus = (breakInternalKey & CAPS_MASK) ? 1 : 0;
+    vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, breakData,
+                    breakCapsStatus, false);
+
+    vUseMacro = savedUseMacro;
+
+    if (hookState_->code != vRestore &&
+        hookState_->code != vRestoreAndStartNewSession) {
+        if (replayEndedWithRestore && rawAscii != currentWord) {
+            outRestoredWord = rawAscii;
+            return true;
+        }
+        // Keep the user's physical `w` sequence when Telex collapses an invalid
+        // tail such as `ddww` into a displayed word ending in literal `w`.
+        const bool shownEndsWithLiteralW =
+            !currentWord.empty() &&
+            (currentWord.back() == 'w' || currentWord.back() == 'W');
+        const bool rawContainsRepeatedW =
+            rawAscii.find("ww") != std::string::npos ||
+            rawAscii.find("wW") != std::string::npos ||
+            rawAscii.find("Ww") != std::string::npos ||
+            rawAscii.find("WW") != std::string::npos;
+        if (rawAscii != currentWord && shownEndsWithLiteralW &&
+            rawContainsRepeatedW) {
+            outRestoredWord = rawAscii;
+            return true;
+        }
+        return false;
+    }
+
+    std::string restored =
+        utf8DropLastN(replayedWord, hookState_->backspaceCount);
+    for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+        restored += engineCodeToUTF8(hookState_->charData[i]);
+    }
+    if (!fcitx::utf8::validate(restored) || restored.empty() ||
+        restored == currentWord) {
         return false;
     }
     outRestoredWord = std::move(restored);
@@ -344,6 +454,13 @@ OpenKeyProcessResult OpenKeyAdapter::processAsciiKey(const std::string &currentW
                                                     char asciiChar) const {
     OpenKeyProcessResult result;
     if (!isAsciiHandled(asciiChar)) {
+        return result;
+    }
+
+    if (literalWAtWordStart_ && currentWord.empty() &&
+        (asciiChar == 'w' || asciiChar == 'W')) {
+        result.handled = true;
+        result.newWord.assign(1, asciiChar);
         return result;
     }
 
@@ -365,6 +482,8 @@ OpenKeyProcessResult OpenKeyAdapter::processAsciiKey(const std::string &currentW
             }
         }
     }
+
+    resetCoreState();
 
     const auto internalWord = encodeWordToInternal(currentWord);
     if (!currentWord.empty() && internalWord.empty()) {

@@ -1076,6 +1076,7 @@ public:
             ic->commitString(out);
             state.lastCommitted = state.composing;
             state.composing.clear();
+            state.preeditKeyBuffer.clear();
             updatePreeditUI(ic, state);
             event.filterAndAccept();
             return true;
@@ -1097,6 +1098,9 @@ public:
                 } else {
                     state.composing.clear();
                 }
+                if (!state.preeditKeyBuffer.empty()) {
+                    state.preeditKeyBuffer.pop_back();
+                }
                 updatePreeditUI(ic, state);
                 event.filterAndAccept();
                 return true;
@@ -1107,6 +1111,7 @@ public:
         if (key.check(FcitxKey_Escape)) {
             if (!state.composing.empty()) {
                 state.composing.clear();
+                state.preeditKeyBuffer.clear();
                 updatePreeditUI(ic, state);
                 event.filterAndAccept();
                 return true;
@@ -1147,8 +1152,14 @@ public:
                 return false;
             }
             std::string restoredWord;
-            if (!deps_.adapter->restoreOnWordBreak(state.composing, trigger,
-                                                   restoredWord)) {
+            const bool restored =
+                !state.preeditKeyBuffer.empty()
+                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
+                          state.composing, state.preeditKeyBuffer, trigger,
+                          restoredWord)
+                    : deps_.adapter->restoreOnWordBreak(state.composing, trigger,
+                                                       restoredWord);
+            if (!restored) {
                 return false;
             }
             state.composing = std::move(restoredWord);
@@ -1181,6 +1192,7 @@ public:
                 return false;
             }
             state.composing = std::move(r.newWord);
+            state.preeditKeyBuffer.push_back(c);
             updatePreeditUI(ic, state);
             event.filterAndAccept();
             return true;
@@ -1191,6 +1203,7 @@ public:
 
     void reset(OpenKeyState &state) override {
         state.composing.clear();
+        state.preeditKeyBuffer.clear();
     }
 
 private:
@@ -1225,6 +1238,7 @@ private:
         ic->commitString(state.composing);
         state.lastCommitted = state.composing;
         state.composing.clear();
+        state.preeditKeyBuffer.clear();
         updatePreeditUI(ic, state);
     }
 
@@ -1260,6 +1274,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = false;
             return false;
         }
@@ -1270,6 +1285,7 @@ public:
                     !fcitx::utf8::validate(state.rollbackDisplay)) {
                     state.rollbackWord.clear();
                     state.rollbackDisplay.clear();
+                    state.rollbackRawBuffer.clear();
                     return false;
                 }
                 const auto len = fcitx::utf8::length(state.rollbackWord);
@@ -1288,6 +1304,7 @@ public:
                 if (deleteChars > 128) {
                     state.rollbackWord.clear();
                     state.rollbackDisplay.clear();
+                    state.rollbackRawBuffer.clear();
                     return false;
                 }
                 if (deleteChars > 0) {
@@ -1297,6 +1314,12 @@ public:
                     ic->commitString(newDisplay.substr(prefixLen));
                 }
                 state.rollbackDisplay = std::move(newDisplay);
+                if (!state.rollbackRawBuffer.empty()) {
+                    state.rollbackRawBuffer.pop_back();
+                }
+                if (state.rollbackDisplay.empty()) {
+                    state.rollbackRawBuffer.clear();
+                }
                 if (debug) {
                     FCITX_INFO() << "openkey: st bs program=" << state.program
                                  << " deleteChars=" << deleteChars
@@ -1316,6 +1339,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = false;
             return false;
         }
@@ -1325,6 +1349,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = false;
             return false;
         }
@@ -1337,6 +1362,7 @@ public:
                 st.cursor() > fcitx::utf8::length(st.text())) {
                 state.rollbackWord.clear();
                 state.rollbackDisplay.clear();
+                state.rollbackRawBuffer.clear();
                 return false;
             }
             WordSegment seg;
@@ -1349,6 +1375,7 @@ public:
                 }
                 state.rollbackWord.clear();
                 state.rollbackDisplay.clear();
+                state.rollbackRawBuffer.clear();
                 return false;
             }
         }
@@ -1362,6 +1389,7 @@ public:
             ic->commitString(replacement);
             state.rollbackWord = replacement;
             state.rollbackDisplay = replacement;
+            state.rollbackRawBuffer.clear();
             state.lastCommitted = replacement;
             return true;
         };
@@ -1385,8 +1413,14 @@ public:
                 return false;
             }
             std::string restoredWord;
-            if (!deps_.adapter->restoreOnWordBreak(state.rollbackDisplay,
-                                                   trigger, restoredWord)) {
+            const bool restored =
+                !state.rollbackRawBuffer.empty()
+                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
+                          state.rollbackDisplay, state.rollbackRawBuffer, trigger,
+                          restoredWord)
+                    : deps_.adapter->restoreOnWordBreak(state.rollbackDisplay,
+                                                       trigger, restoredWord);
+            if (!restored) {
                 return false;
             }
             return replaceRollbackDisplay(restoredWord);
@@ -1399,6 +1433,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = true;
             return false;
         }
@@ -1410,6 +1445,7 @@ public:
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             state.noSeedNextWord = true;
             return false;
         }
@@ -1423,6 +1459,7 @@ public:
                 if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
                     state.rollbackWord = seg.word;
                     state.rollbackDisplay = seg.word;
+                    state.rollbackRawBuffer.clear();
                     if (debug) {
                         FCITX_INFO() << "openkey: st seed program=" << state.program
                                      << " st.cursor=" << st.cursor()
@@ -1437,6 +1474,7 @@ public:
         if (!r.handled) {
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             return false;
         }
         if (!fcitx::utf8::validate(r.newWord)) {
@@ -1446,6 +1484,7 @@ public:
             }
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             return false;
         }
 
@@ -1462,6 +1501,7 @@ public:
             }
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
+            state.rollbackRawBuffer.clear();
             return false;
         }
         if (deleteChars > 0) {
@@ -1479,6 +1519,7 @@ public:
 
         state.rollbackWord = r.newWord;
         state.rollbackDisplay = r.newWord;
+        state.rollbackRawBuffer.push_back(c);
         state.lastCommitted = state.rollbackDisplay;
         event.filterAndAccept();
         return true;
@@ -1488,6 +1529,7 @@ public:
         state.macroBuffer.clear();
         state.rollbackWord.clear();
         state.rollbackDisplay.clear();
+        state.rollbackRawBuffer.clear();
         state.noSeedNextWord = false;
     }
 
@@ -1598,6 +1640,7 @@ private:
         }
 
         deltaState.shownText.clear();
+        deltaState.rawAsciiBuffer.clear();
         deltaState.hasRewrittenCurrentWord = false;
         deltaState.rewriteLock = false;
         deltaState.waitingBackspaceAck = false;
@@ -1687,6 +1730,7 @@ private:
         deltaState.seenBackspaces = 0;
         deltaState.ackTimeoutTimer.reset();
         if (deltaState.shownText.empty()) {
+            deltaState.rawAsciiBuffer.clear();
             deltaState.hasRewrittenCurrentWord = false;
         }
 
@@ -1938,8 +1982,14 @@ private:
 
         adapterShared->setCodeTable(state.codeTable);
         std::string restoredWord;
-        if (!adapterShared->restoreOnWordBreak(deltaState.shownText, trigger,
-                                               restoredWord)) {
+        const bool restored =
+            !deltaState.rawAsciiBuffer.empty()
+                ? adapterShared->restoreFromRawAsciiOnWordBreak(
+                      deltaState.shownText, deltaState.rawAsciiBuffer, trigger,
+                      restoredWord)
+                : adapterShared->restoreOnWordBreak(deltaState.shownText, trigger,
+                                                   restoredWord);
+        if (!restored) {
             return false;
         }
 
@@ -2016,6 +2066,7 @@ private:
                 clearWordState(deltaState);
                 return false;
             }
+            deltaState.rawAsciiBuffer.push_back(c);
             return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
@@ -2156,6 +2207,7 @@ private:
                         << " remotePending=" << nonPreeditState.remoteRewritePending;
         }
         nonPreeditState.shownText.clear();
+        nonPreeditState.rawAsciiBuffer.clear();
         nonPreeditState.hasRewrittenCurrentWord = false;
         nonPreeditState.rewriteLock = false;
         nonPreeditState.waitingBackspaceAck = false;
@@ -2194,6 +2246,7 @@ private:
         nonPreeditState.remotePendingTxId = 0;
         nonPreeditState.remoteRewritePending = false;
         if (nonPreeditState.shownText.empty()) {
+            nonPreeditState.rawAsciiBuffer.clear();
             nonPreeditState.hasRewrittenCurrentWord = false;
         }
 
@@ -2390,8 +2443,14 @@ private:
 
         adapterShared->setCodeTable(state.codeTable);
         std::string restoredWord;
-        if (!adapterShared->restoreOnWordBreak(nonPreeditState.shownText,
-                                               trigger, restoredWord)) {
+        const bool restored =
+            !nonPreeditState.rawAsciiBuffer.empty()
+                ? adapterShared->restoreFromRawAsciiOnWordBreak(
+                      nonPreeditState.shownText,
+                      nonPreeditState.rawAsciiBuffer, trigger, restoredWord)
+                : adapterShared->restoreOnWordBreak(nonPreeditState.shownText,
+                                                   trigger, restoredWord);
+        if (!restored) {
             return false;
         }
 
@@ -2443,8 +2502,12 @@ private:
             if (method != BackspaceInjector::Method::Uinput) {
                 return false;
             }
+            if (!nonPreeditState.rawAsciiBuffer.empty()) {
+                nonPreeditState.rawAsciiBuffer.pop_back();
+            }
             nonPreeditState.shownText = utf8DropLastN(nonPreeditState.shownText, 1);
             if (nonPreeditState.shownText.empty()) {
+                nonPreeditState.rawAsciiBuffer.clear();
                 nonPreeditState.hasRewrittenCurrentWord = false;
             }
             return true;
@@ -2489,6 +2552,7 @@ private:
                 clearComposeState(nonPreeditState, "adapter-not-handled");
                 return false;
             }
+            nonPreeditState.rawAsciiBuffer.push_back(c);
             return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
         }
 
@@ -2625,9 +2689,9 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
             return "Non Preedit (Gtk Only)";
         case RuntimeMode::Preedit:
             return "Preedit";
-        case RuntimeMode::BackspaceRewriteDelta:
-            return "Non Preedit";
         case RuntimeMode::NonPreeditBackspaceRewrite:
+            return "Non Preedit";
+        case RuntimeMode::BackspaceRewriteDelta:
             return "Non Preedit (Non Server)";
         case RuntimeMode::DirectCommit:
             return "Direct";
@@ -2656,9 +2720,9 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
         return "Non Preedit (Gtk Only)";
     case RuntimeMode::Preedit:
         return "Preedit";
-    case RuntimeMode::BackspaceRewriteDelta:
-        return "Non Preedit";
     case RuntimeMode::NonPreeditBackspaceRewrite:
+        return "Non Preedit";
+    case RuntimeMode::BackspaceRewriteDelta:
         return "Non Preedit (Non Server)";
     case RuntimeMode::DirectCommit:
         return "Direct";
@@ -2819,6 +2883,7 @@ void OpenKeyEngine::applyConfig() {
     adapter_->setCodeTable(toOpenKeyCodeTable(config_.codeTable.value()));
     adapter_->setCheckSpelling(config_.checkSpelling.value());
     adapter_->setUseModernOrthography(config_.useModernOrthography.value());
+    adapter_->setLiteralWAtWordStart(config_.literalWAtWordStart.value());
     adapter_->setQuickTelex(false);
     adapter_->setRestoreIfWrongSpelling(config_.restoreIfWrongSpelling.value());
     adapter_->setUpperCaseFirstChar(false);
@@ -2887,9 +2952,11 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     state->delta.clear();
     state->nonPreeditDelta.clear();
     state->composing.clear();
+    state->preeditKeyBuffer.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
+    state->rollbackRawBuffer.clear();
     state->noSeedNextWord = false;
     state->manualMode = false;
     state->modeDecided = false;
@@ -2926,9 +2993,11 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     state->delta.clear();
     state->nonPreeditDelta.clear();
     state->composing.clear();
+    state->preeditKeyBuffer.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
+    state->rollbackRawBuffer.clear();
     ic->inputPanel().reset();
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
@@ -3004,14 +3073,16 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 state->delta.clear();
                 state->nonPreeditDelta.clear();
                 state->composing.clear();
+                state->preeditKeyBuffer.clear();
                 state->macroBuffer.clear();
-            state->rollbackWord.clear();
-            state->rollbackDisplay.clear();
-            state->noSeedNextWord = false;
-            ic->inputPanel().reset();
-            ic->updatePreedit();
-            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
-        };
+                state->rollbackWord.clear();
+                state->rollbackDisplay.clear();
+                state->rollbackRawBuffer.clear();
+                state->noSeedNextWord = false;
+                ic->inputPanel().reset();
+                ic->updatePreedit();
+                ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+            };
 
         bool returnToAuto = false;
         RuntimeMode nextMode;
@@ -3086,9 +3157,9 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                     return "Non Preedit (Gtk Only)";
                 case RuntimeMode::Preedit:
                     return "Preedit";
-                case RuntimeMode::BackspaceRewriteDelta:
-                    return "Non Preedit";
                 case RuntimeMode::NonPreeditBackspaceRewrite:
+                    return "Non Preedit";
+                case RuntimeMode::BackspaceRewriteDelta:
                     return "Non Preedit (Non Server)";
                 case RuntimeMode::DirectCommit:
                     return "Direct";

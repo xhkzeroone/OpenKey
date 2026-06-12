@@ -3,6 +3,7 @@
 
 #include <fcitx-utils/utf8.h>
 
+#include "Macro.h"
 #include "openkey_adapter.h"
 #include "surrounding_text_utils.h"
 
@@ -34,14 +35,20 @@ std::string typeSequence(openkey::OpenKeyAdapter &adapter,
     return word;
 }
 
-} // namespace
-
-int main() {
+openkey::OpenKeyAdapter makeAdapter() {
     openkey::OpenKeyAdapter adapter;
     adapter.setInputType(0);    // Telex
     adapter.setCodeTable(0);    // Unicode precomposed
     adapter.setFreeMark(true);
     adapter.setCheckSpelling(true);
+    adapter.setRestoreIfWrongSpelling(true);
+    return adapter;
+}
+
+} // namespace
+
+int main() {
+    auto adapter = makeAdapter();
 
     expectEq("a", typeSequence(adapter, "a"), "a");
     expectEq("as", typeSequence(adapter, "as"), "á");
@@ -60,6 +67,59 @@ int main() {
     expectEq("ddieenj", typeSequence(adapter, "ddieenj"), "điện");
     expectEq("truowngf", typeSequence(adapter, "truowngf"), "trường");
     expectEq("nguoiwf", typeSequence(adapter, "nguoiwf"), "người");
+    expectEq("ddww", typeSequence(adapter, "ddww"), "đw");
+    {
+        auto restoreAdapter = makeAdapter();
+        std::string restored;
+        if (!restoreAdapter.restoreFromRawAsciiOnWordBreak("đw", "ddww", ' ',
+                                                           restored)) {
+            failures++;
+            std::cerr << "[FAIL] restoreFromRaw ddww: returned false\n";
+        } else {
+            expectEq("restoreFromRaw ddww", restored, "ddww");
+        }
+    }
+    {
+        auto restoreAdapter = makeAdapter();
+        const std::string shown = typeSequence(restoreAdapter, "khoongg");
+        expectEq("khoongg shown", shown, "khôngg");
+        std::string restored;
+        if (!restoreAdapter.restoreFromRawAsciiOnWordBreak(shown, "khoongg", ' ',
+                                                           restored)) {
+            failures++;
+            std::cerr << "[FAIL] restoreFromRaw khoongg: returned false\n";
+        } else {
+            expectEq("restoreFromRaw khoongg", restored, "khoongg");
+        }
+    }
+    {
+        auto literalWAdapter = makeAdapter();
+        literalWAdapter.setLiteralWAtWordStart(true);
+        expectEq("literal w start", typeSequence(literalWAdapter, "w"), "w");
+        expectEq("literal wa start", typeSequence(literalWAdapter, "wa"), "wa");
+    }
+
+    initMacroMap(nullptr, 0);
+    addMacro("cjv", "cái gì vậy");
+    addMacro("qtqd", "quá trời quá đất");
+    {
+        std::string expanded;
+        if (!adapter.expandMacro("cjv", expanded)) {
+            failures++;
+            std::cerr << "[FAIL] expandMacro cjv: returned false\n";
+        } else {
+            expectEq("expandMacro cjv", expanded, "cái gì vậy");
+        }
+    }
+    {
+        std::string expanded;
+        if (!adapter.expandMacro("qtqd", expanded)) {
+            failures++;
+            std::cerr << "[FAIL] expandMacro qtqd: returned false\n";
+        } else {
+            expectEq("expandMacro qtqd", expanded, "quá trời quá đất");
+        }
+    }
 
     // Surrounding-text extraction should be char-safe with emoji.
     {

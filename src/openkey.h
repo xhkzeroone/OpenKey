@@ -46,6 +46,7 @@ enum class RuntimeMode {
 
 struct DeltaRewriteState {
     std::string shownText;
+    std::string rawAsciiBuffer;
     bool hasRewrittenCurrentWord = false;
     bool rewriteLock = false;
     bool waitingBackspaceAck = false;
@@ -70,6 +71,7 @@ struct DeltaRewriteState {
         }
 
         shownText.clear();
+        rawAsciiBuffer.clear();
         hasRewrittenCurrentWord = false;
         rewriteLock = false;
         waitingBackspaceAck = false;
@@ -86,6 +88,7 @@ struct DeltaRewriteState {
 
 struct NonPreeditDeltaRewriteState {
     std::string shownText;
+    std::string rawAsciiBuffer;
     bool hasRewrittenCurrentWord = false;
     bool rewriteLock = false;
     bool waitingBackspaceAck = false;
@@ -114,6 +117,7 @@ struct NonPreeditDeltaRewriteState {
         }
 
         shownText.clear();
+        rawAsciiBuffer.clear();
         hasRewrittenCurrentWord = false;
         rewriteLock = false;
         waitingBackspaceAck = false;
@@ -138,12 +142,14 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
 
     std::string composing;
+    std::string preeditKeyBuffer;
     std::string lastCommitted;
     std::string macroBuffer;
     // For surrounding-text "direct rollback" mode: track the current word we
     // have rewritten so we don't rely on surrounding text contents being fresh.
     std::string rollbackWord;
     std::string rollbackDisplay;
+    std::string rollbackRawBuffer;
     bool noSeedNextWord = false;
     RuntimeMode mode = RuntimeMode::SurroundingText;
     RuntimeMode autoMode = RuntimeMode::SurroundingText;

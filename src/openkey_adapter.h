@@ -26,6 +26,7 @@ public:
     void setCodeTable(int codeTable);
     void setCheckSpelling(bool checkSpelling);
     void setUseModernOrthography(bool enabled);
+    void setLiteralWAtWordStart(bool enabled);
     void setQuickTelex(bool enabled);
     void setRestoreIfWrongSpelling(bool enabled);
     void setUpperCaseFirstChar(bool enabled);
@@ -52,6 +53,13 @@ public:
     bool restoreOnWordBreak(const std::string &currentWord, char breakChar,
                             std::string &outRestoredWord) const;
 
+    // Rebuild the engine state from the raw ASCII key sequence and ask the
+    // core whether the word should be restored on a word-break key.
+    bool restoreFromRawAsciiOnWordBreak(const std::string &currentWord,
+                                        const std::string &rawAscii,
+                                        char breakChar,
+                                        std::string &outRestoredWord) const;
+
     // Convert a full raw ASCII Telex/VNI buffer into Vietnamese UTF-8.
     // This feeds characters into OpenKey core sequentially.
     std::string convertRawBuffer(const std::string &rawAscii) const;
@@ -62,7 +70,8 @@ public:
                                          char asciiChar) const;
 
 private:
-    const vKeyHookState *hookState_ = nullptr;
+    mutable const vKeyHookState *hookState_ = nullptr;
+    bool literalWAtWordStart_ = false;
     std::unordered_map<uint32_t, uint32_t> unicodeToInternal_;
     // Map from legacy (TCVN3/VNI) 16-bit codes to Unicode codepoint.
     // Only used when vCodeTable != 0.
@@ -71,6 +80,7 @@ private:
 
     void ensureReverseMap();
     void ensureLegacyToUnicodeMap() const;
+    void resetCoreState() const;
     std::vector<uint32_t> encodeWordToInternal(const std::string &word) const;
     std::string engineCodeToUTF8(uint32_t code) const;
     static std::string utf8DropLastN(const std::string &s, size_t n);

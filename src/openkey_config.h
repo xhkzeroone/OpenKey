@@ -64,6 +64,11 @@ FCITX_CONFIGURATION(
         false};
     fcitx::Option<bool> useModernOrthography{
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
+    fcitx::Option<bool> literalWAtWordStart{
+        this,
+        "LiteralWAtWordStart",
+        N_("Giữ nguyên W ở đầu từ"),
+        false};
     fcitx::Option<bool> allowConsonantZFWJ{
         this, "AllowConsonantZFWJ", N_("Cho phép gõ phụ âm Z, F, W, J"), true};
     fcitx::SubConfigOption macroEditor{
