@@ -61,21 +61,21 @@ FCITX_CONFIGURATION(
         this,
         "RestoreIfWrongSpelling",
         N_("Tự trả phím khi gõ sai chính tả"),
-        false};
+        true};
     fcitx::Option<bool> enableBackspaceSnapshot{
         this,
         "EnableBackspaceSnapshot",
         N_("Cho phép Backspace quay lại sửa từ vừa gõ"),
-        false};
+        true};
     fcitx::Option<bool> useModernOrthography{
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
     fcitx::Option<bool> literalWAtWordStart{
         this,
         "LiteralWAtWordStart",
         N_("Giữ nguyên W ở đầu từ"),
-        false};
+        true};
     fcitx::Option<bool> allowConsonantZFWJ{
-        this, "AllowConsonantZFWJ", N_("Cho phép gõ phụ âm Z, F, W, J"), true};
+        this, "AllowConsonantZFWJ", N_("Cho phép gõ phụ âm Z, F, W, J"), false};
     fcitx::SubConfigOption macroEditor{
         this, "MacroEditor", N_("Trình chỉnh sửa gõ tắt"), "fcitx://config/addon/openkey/openkey-macro"};
     fcitx::Option<bool> debug{this, "Debug", N_("Ghi nhật ký gỡ lỗi (debug)"), false};
