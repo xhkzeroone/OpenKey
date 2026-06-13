@@ -1613,8 +1613,18 @@ public:
         }
 
         if (isBackspace()) {
-            if (!restoreBackspaceSnapshot(deltaState)) {
-                clearWordState(deltaState);
+            if (restoreBackspaceSnapshot(deltaState)) {
+                return true;
+            }
+            if (!deltaState.shownText.empty()) {
+                deltaState.shownText = utf8DropLastN(deltaState.shownText, 1);
+                if (!deltaState.rawAsciiBuffer.empty()) {
+                    deltaState.rawAsciiBuffer.pop_back();
+                }
+                if (deltaState.shownText.empty()) {
+                    deltaState.rawAsciiBuffer.clear();
+                    deltaState.hasRewrittenCurrentWord = false;
+                }
             }
             return false;
         }
@@ -2286,10 +2296,21 @@ public:
         }
 
         if (isBackspace()) {
-            if (!restoreBackspaceSnapshot(nonPreeditState)) {
-                clearComposeState(nonPreeditState, "backspace");
+            if (restoreBackspaceSnapshot(nonPreeditState)) {
+                return true;
             }
-            return false;
+            // Không clear hết — chỉ drop ký tự cuối để giữ context
+            if (!nonPreeditState.shownText.empty()) {
+                nonPreeditState.shownText = utf8DropLastN(nonPreeditState.shownText, 1);
+                if (!nonPreeditState.rawAsciiBuffer.empty()) {
+                    nonPreeditState.rawAsciiBuffer.pop_back();
+                }
+                if (nonPreeditState.shownText.empty()) {
+                    nonPreeditState.rawAsciiBuffer.clear();
+                    nonPreeditState.hasRewrittenCurrentWord = false;
+                }
+            }
+            return false; // để app tự xóa ký tự trên màn hình
         }
 
         if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
