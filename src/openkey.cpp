@@ -585,13 +585,13 @@ struct DeltaRewriteTiming {
 
 // Delta timing tuned based on NonPreedit values
 // Format: {interKeyUsec, commitDelayUsec}
-static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 50000};
-static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 50000};
-static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 50000};
-static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 50000};
-static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 100000};
-static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 100000};
-static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 100000};
+static constexpr DeltaRewriteTiming kDeltaWaylandTiming{1000, 20000};
+static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{1000, 20000};
+static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{1000, 20000};
+static constexpr DeltaRewriteTiming kDeltaX11Timing{1000, 80000};
+static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{1000, 20000};
+static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{1000, 80000};
+static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{1000, 80000};
 static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 20000;
 
 static constexpr RewriteTiming kNonPreeditWaylandTiming{1000, 20000};
@@ -620,14 +620,6 @@ static bool isFcitx4Frontend(fcitx::InputContext *ic) {
     }
     return asciiLower(ic->frontend()).find("fcitx4") != std::string::npos;
 }
-
-static bool isXimFrontend(fcitx::InputContext *ic) {
-    if (!ic || !ic->frontend()) {
-        return false;
-    }
-    return asciiLower(ic->frontend()).find("xim") != std::string::npos;
-}
-
 
 static bool isBrowserLikeProgram(const std::string &program) {
     if (program.empty()) {
@@ -948,6 +940,15 @@ private:
 };
 
 static BackspaceInjector g_backspaceInjector;
+
+static void forwardKeyPressAndRelease(fcitx::InputContext *ic,
+                                      const fcitx::Key &key) {
+    if (!ic) {
+        return;
+    }
+    ic->forwardKey(key);
+    ic->forwardKey(key, true);
+}
 
 static std::size_t commonPrefixBytesUTF8Boundary(const std::string &s1,
                                                  const std::string &s2) {
@@ -1595,11 +1596,8 @@ public:
                 event.filterAndAccept();
 
                 const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
-                if (isXimFrontend(ic)) {
-                    scheduleFinishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
-                } else {
-                    finishPendingBackspaceCommit(ic, state, timing.commitDelayUsec);
-                }
+                scheduleFinishPendingBackspaceCommit(ic, state,
+                                                     timing.commitDelayUsec);
                 return true;
             }
 
@@ -1804,7 +1802,7 @@ private:
         auto &deltaState = state.delta;
 
         if (!deps_.instance || commitDelayUsec == 0) {
-            finishPendingBackspaceCommit(ic, state, 0);
+            finishPendingBackspaceCommit(ic, state);
             return;
         }
 
@@ -1837,20 +1835,19 @@ private:
 
                 auto _timer = std::move(st->delta.ackTimeoutTimer);
 
-                finishPendingBackspaceCommit(ic2, *st, 0);
+                finishPendingBackspaceCommit(ic2, *st);
                 return false;
             });
 
         if (deltaState.ackTimeoutTimer) {
             deltaState.ackTimeoutTimer->setOneShot();
         } else {
-            finishPendingBackspaceCommit(ic, state, 0);
+            finishPendingBackspaceCommit(ic, state);
         }
     }
 
     void finishPendingBackspaceCommit(fcitx::InputContext *ic,
-                                      OpenKeyState &state,
-                                      uint64_t commitDelayUsec) {
+                                      OpenKeyState &state) {
         auto &deltaState = state.delta;
         const std::string commitText = std::move(deltaState.pendingConvertedText);
         const std::string shownAfter =
@@ -1862,12 +1859,8 @@ private:
         if (!commitText.empty()) {
             const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
             if (debug) {
-                FCITX_INFO() << "openkey: bs-delta commit-delay"
-                             << " program=" << state.program
-                             << " delay=" << commitDelayUsec;
-            }
-            if (commitDelayUsec > 0) {
-                ::usleep(static_cast<useconds_t>(std::min<uint64_t>(commitDelayUsec, 1000000)));
+                FCITX_INFO() << "openkey: bs-delta commit"
+                             << " program=" << state.program;
             }
             ic->commitString(commitText);
         }
@@ -1987,11 +1980,8 @@ private:
                              << " seen=" << st->delta.seenBackspaces
                              << " expected=" << st->delta.expectedBackspaces;
                 const DeltaRewriteTiming timing = deltaTimingFor(ic2, st->program);
-                if (isXimFrontend(ic2)) {
-                    scheduleFinishPendingBackspaceCommit(ic2, *st, timing.commitDelayUsec);
-                } else {
-                    finishPendingBackspaceCommit(ic2, *st, timing.commitDelayUsec);
-                }
+                scheduleFinishPendingBackspaceCommit(ic2, *st,
+                                                     timing.commitDelayUsec);
                 return false;
             });
         if (deltaState.ackTimeoutTimer) {
@@ -2114,7 +2104,7 @@ private:
             deltaState.queuedKeys.push_front(boundaryKey);
         } else {
             rememberBackspaceSnapshot(deltaState);
-            ic->forwardKey(boundaryKey);
+            forwardKeyPressAndRelease(ic, boundaryKey);
             clearWordState(deltaState, false);
         }
         return true;
@@ -2154,7 +2144,7 @@ private:
             deltaState.queuedKeys.push_front(boundaryKey);
         } else {
             rememberBackspaceSnapshot(deltaState);
-            ic->forwardKey(boundaryKey);
+            forwardKeyPressAndRelease(ic, boundaryKey);
             clearWordState(deltaState, false);
         }
         return true;
@@ -2248,7 +2238,7 @@ private:
             const bool handled =
                 processQueuedKey(ic, state, key, adapterShared, debug);
             if (!handled) {
-                ic->forwardKey(key);
+                forwardKeyPressAndRelease(ic, key);
             }
         }
         deltaState.processingQueue = false;
@@ -2723,7 +2713,7 @@ private:
             nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
         } else {
             rememberBackspaceSnapshot(nonPreeditState);
-            ic->forwardKey(boundaryKey);
+            forwardKeyPressAndRelease(ic, boundaryKey);
             clearComposeState(nonPreeditState, "macro-boundary", false);
         }
         return true;
@@ -2763,7 +2753,7 @@ private:
             nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
         } else {
             rememberBackspaceSnapshot(nonPreeditState);
-            ic->forwardKey(boundaryKey);
+            forwardKeyPressAndRelease(ic, boundaryKey);
             clearComposeState(nonPreeditState, "restore-boundary", false);
         }
         return true;
@@ -2883,7 +2873,7 @@ private:
             const bool handled =
                 processNonPreeditKey(ic, state, nonPreeditKey, adapterShared, debug);
             if (!handled) {
-                ic->forwardKey(nonPreeditKey);
+                forwardKeyPressAndRelease(ic, nonPreeditKey);
             }
         }
         nonPreeditState.processingNonPreedit = false;
