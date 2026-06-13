@@ -62,6 +62,11 @@ FCITX_CONFIGURATION(
         "RestoreIfWrongSpelling",
         N_("Tự trả phím khi gõ sai chính tả"),
         false};
+    fcitx::Option<bool> enableBackspaceSnapshot{
+        this,
+        "EnableBackspaceSnapshot",
+        N_("Cho phép Backspace quay lại sửa từ vừa gõ"),
+        false};
     fcitx::Option<bool> useModernOrthography{
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
     fcitx::Option<bool> literalWAtWordStart{

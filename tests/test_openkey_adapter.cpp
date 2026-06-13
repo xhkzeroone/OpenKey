@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include <fcitx-utils/utf8.h>
@@ -43,6 +45,144 @@ openkey::OpenKeyAdapter makeAdapter() {
     adapter.setCheckSpelling(true);
     adapter.setRestoreIfWrongSpelling(true);
     return adapter;
+}
+
+std::string utf8DropLastN(const std::string &s, size_t n) {
+    if (n == 0) {
+        return s;
+    }
+    if (!fcitx::utf8::validate(s)) {
+        return {};
+    }
+    const auto len = fcitx::utf8::length(s);
+    if (n >= len) {
+        return {};
+    }
+    const auto keep = len - n;
+    auto it = fcitx::utf8::nextNChar(s.begin(), keep);
+    return std::string(s.begin(), it);
+}
+
+std::size_t commonPrefixBytesUTF8Boundary(const std::string &s1,
+                                          const std::string &s2) {
+    std::size_t n = std::min(s1.size(), s2.size());
+    std::size_t i = 0;
+    while (i < n && s1[i] == s2[i]) {
+        ++i;
+    }
+    while (i > 0 && i < s1.size() &&
+           (static_cast<unsigned char>(s1[i]) & 0xC0u) == 0x80u) {
+        --i;
+    }
+    return i;
+}
+
+unsigned int utf8CharCount(const std::string &s) {
+    if (!fcitx::utf8::validate(s)) {
+        return 0;
+    }
+    return static_cast<unsigned int>(fcitx::utf8::length(s));
+}
+
+enum class BackspaceSnapshotMode {
+    Delta,
+    NonPreeditRemote,
+};
+
+std::string quote(const std::string &s) {
+    return "\"" + s + "\"";
+}
+
+std::string simulateBackspaceSnapshot(openkey::OpenKeyAdapter &adapter,
+                                      const std::string &ascii,
+                                      BackspaceSnapshotMode mode) {
+    std::string shown;
+    std::string rawAscii;
+    std::string appText;
+    std::string snapshotShown;
+    std::string snapshotRawAscii;
+    bool canReseedFromSnapshot = false;
+    std::ostringstream out;
+
+    out << (mode == BackspaceSnapshotMode::Delta ? "mode=backspace"
+                                                 : "mode=nonPreedit")
+        << "\n";
+    for (char c : ascii) {
+        if (c == ' ') {
+            if (!shown.empty()) {
+                snapshotShown = shown;
+                snapshotRawAscii = rawAscii;
+                canReseedFromSnapshot = true;
+            } else if (!canReseedFromSnapshot || snapshotShown.empty()) {
+                snapshotShown.clear();
+                snapshotRawAscii.clear();
+                canReseedFromSnapshot = false;
+            }
+            appText.push_back(' ');
+            shown.clear();
+            rawAscii.clear();
+            out << "key space: forward -> app=" << quote(appText)
+                << " shown=\"\" snapshot=" << quote(snapshotShown) << "\n";
+            continue;
+        }
+        if (c == '<') {
+            if (canReseedFromSnapshot && shown.empty() &&
+                !snapshotShown.empty()) {
+                shown = snapshotShown;
+                rawAscii = snapshotRawAscii;
+                snapshotShown.clear();
+                snapshotRawAscii.clear();
+                canReseedFromSnapshot = false;
+            }
+            appText = utf8DropLastN(appText, 1);
+            out << "key backspace: forward -> app=" << quote(appText)
+                << " shown=" << quote(shown) << "\n";
+            continue;
+        }
+
+        const auto r = adapter.processAsciiKey(shown, c);
+        if (!r.handled) {
+            appText.push_back(c);
+            shown.clear();
+            rawAscii.clear();
+            out << "key " << c << ": forward -> app=" << quote(appText)
+                << " shown=\"\"\n";
+            continue;
+        }
+
+        const std::size_t prefixLen =
+            commonPrefixBytesUTF8Boundary(shown, r.newWord);
+        const unsigned int deleteCount =
+            utf8CharCount(shown.substr(prefixLen));
+        const std::string commitText = r.newWord.substr(prefixLen);
+
+        if (deleteCount == 0) {
+            appText += commitText;
+            out << "key " << c << ": commit " << quote(commitText)
+                << " -> app=" << quote(appText) << " shown="
+                << quote(r.newWord) << "\n";
+        } else if (mode == BackspaceSnapshotMode::Delta) {
+            appText = utf8DropLastN(appText, deleteCount);
+            appText += commitText;
+            out << "key " << c << ": inject backspaces=" << deleteCount
+                << " + sentinel=1; commit " << quote(commitText)
+                << " -> app=" << quote(appText) << " shown="
+                << quote(r.newWord) << "\n";
+        } else {
+            appText = utf8DropLastN(appText, deleteCount);
+            appText += commitText;
+            out << "key " << c << ": helper PLAN backspaces=" << deleteCount
+                << "; helper DONE; commit " << quote(commitText)
+                << " -> app=" << quote(appText) << " shown="
+                << quote(r.newWord) << "\n";
+        }
+
+        shown = r.newWord;
+        rawAscii.push_back(c);
+    }
+
+    out << "final app=" << quote(appText) << " shown=" << quote(shown);
+    return out.str();
 }
 
 } // namespace
@@ -142,7 +282,54 @@ int main() {
         expectEq("literal w start", typeSequence(literalWAdapter, "w"), "w");
         expectEq("literal wa start", typeSequence(literalWAdapter, "wa"), "wa");
     }
-
+    {
+        auto snapshotAdapter = makeAdapter();
+        expectEq("backspace snapshot",
+                 simulateBackspaceSnapshot(snapshotAdapter, "as",
+                                           BackspaceSnapshotMode::Delta),
+                 "mode=backspace\n"
+                 "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
+                 "key s: inject backspaces=1 + sentinel=1; commit \"á\" -> app=\"á\" shown=\"á\"\n"
+                 "final app=\"á\" shown=\"á\"");
+    }
+    {
+        auto snapshotAdapter = makeAdapter();
+        expectEq("backspace reseed snapshot",
+                 simulateBackspaceSnapshot(snapshotAdapter, "as <f",
+                                           BackspaceSnapshotMode::Delta),
+                 "mode=backspace\n"
+                 "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
+                 "key s: inject backspaces=1 + sentinel=1; commit \"á\" -> app=\"á\" shown=\"á\"\n"
+                 "key space: forward -> app=\"á \" shown=\"\" snapshot=\"á\"\n"
+                 "key backspace: forward -> app=\"á\" shown=\"á\"\n"
+                 "key f: inject backspaces=1 + sentinel=1; commit \"à\" -> app=\"à\" shown=\"à\"\n"
+                 "final app=\"à\" shown=\"à\"");
+    }
+    {
+        auto snapshotAdapter = makeAdapter();
+        expectEq("nonPreedit snapshot",
+                 simulateBackspaceSnapshot(
+                     snapshotAdapter, "as",
+                     BackspaceSnapshotMode::NonPreeditRemote),
+                 "mode=nonPreedit\n"
+                 "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
+                 "key s: helper PLAN backspaces=1; helper DONE; commit \"á\" -> app=\"á\" shown=\"á\"\n"
+                 "final app=\"á\" shown=\"á\"");
+    }
+    {
+        auto snapshotAdapter = makeAdapter();
+        expectEq("nonPreedit reseed snapshot",
+                 simulateBackspaceSnapshot(
+                     snapshotAdapter, "as <f",
+                     BackspaceSnapshotMode::NonPreeditRemote),
+                 "mode=nonPreedit\n"
+                 "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
+                 "key s: helper PLAN backspaces=1; helper DONE; commit \"á\" -> app=\"á\" shown=\"á\"\n"
+                 "key space: forward -> app=\"á \" shown=\"\" snapshot=\"á\"\n"
+                 "key backspace: forward -> app=\"á\" shown=\"á\"\n"
+                 "key f: helper PLAN backspaces=1; helper DONE; commit \"à\" -> app=\"à\" shown=\"à\"\n"
+                 "final app=\"à\" shown=\"à\"");
+    }
     initMacroMap(nullptr, 0);
     addMacro("cjv", "cái gì vậy");
     addMacro("qtqd", "quá trời quá đất");

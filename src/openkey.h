@@ -58,6 +58,14 @@ struct DeltaRewriteState {
     std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
     std::string pendingConvertedText;
     std::string pendingShownTextAfterCommit;
+    std::string backspaceSnapshotShownText;
+    std::string backspaceSnapshotRawAsciiBuffer;
+    bool backspaceSnapshotHasRewrittenCurrentWord = false;
+    bool canReseedFromBackspaceSnapshot = false;
+    bool restoredFromBackspaceSnapshot = false;
+    bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
+    bool backspaceSnapshotUsesSurrounding = false;
+    bool allowBackspaceSnapshotResetPreserve = false;
 
     bool hasPendingRewrite() const {
         return rewriteLock || waitingBackspaceAck ||
@@ -83,6 +91,14 @@ struct DeltaRewriteState {
         ackTimeoutTimer.reset();
         pendingConvertedText.clear();
         pendingShownTextAfterCommit.clear();
+        backspaceSnapshotShownText.clear();
+        backspaceSnapshotRawAsciiBuffer.clear();
+        backspaceSnapshotHasRewrittenCurrentWord = false;
+        canReseedFromBackspaceSnapshot = false;
+        restoredFromBackspaceSnapshot = false;
+        preserveBackspaceSnapshotAfterBoundaryBackspace = false;
+        backspaceSnapshotUsesSurrounding = false;
+        allowBackspaceSnapshotResetPreserve = false;
     }
 };
 
@@ -106,6 +122,14 @@ struct NonPreeditDeltaRewriteState {
     uint64_t remoteNextTxId = 1;
     uint64_t remotePendingTxId = 0;
     bool remoteRewritePending = false;
+    std::string backspaceSnapshotShownText;
+    std::string backspaceSnapshotRawAsciiBuffer;
+    bool backspaceSnapshotHasRewrittenCurrentWord = false;
+    bool canReseedFromBackspaceSnapshot = false;
+    bool restoredFromBackspaceSnapshot = false;
+    bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
+    bool backspaceSnapshotUsesSurrounding = false;
+    bool allowBackspaceSnapshotResetPreserve = false;
 
     bool hasRemoteRewritePending() const {
         return remoteRewritePending || remotePendingTxId != 0;
@@ -133,6 +157,14 @@ struct NonPreeditDeltaRewriteState {
         pendingShownTextAfterCommit.clear();
         remotePendingTxId = 0;
         remoteRewritePending = false;
+        backspaceSnapshotShownText.clear();
+        backspaceSnapshotRawAsciiBuffer.clear();
+        backspaceSnapshotHasRewrittenCurrentWord = false;
+        canReseedFromBackspaceSnapshot = false;
+        restoredFromBackspaceSnapshot = false;
+        preserveBackspaceSnapshotAfterBoundaryBackspace = false;
+        backspaceSnapshotUsesSurrounding = false;
+        allowBackspaceSnapshotResetPreserve = false;
     }
 };
 
