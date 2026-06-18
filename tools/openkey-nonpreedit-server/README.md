@@ -23,6 +23,22 @@ Nếu muốn đổi socket:
 OPENKEY_NONPREEDIT_SERVER_SOCK=/tmp/openkey-nonpreedit.sock
 ```
 
+Mặc định server sẽ cố chạy với process priority cao hơn (`nice -10`) trên
+Linux. Nếu không có quyền `CAP_SYS_NICE` hoặc root, thao tác này sẽ fail
+best-effort và server vẫn chạy bình thường. Có thể tắt bằng:
+
+```bash
+OPENKEY_NONPREEDIT_SERVER_PRIORITY=0
+go run . -priority=false -socket /tmp/openkey-nonpreedit.sock
+```
+
+Với bản cài ở `/usr/libexec`, có thể cấp quyền priority bằng:
+
+```bash
+sudo setcap cap_sys_nice+ep /usr/libexec/openkey-nonpreedit-server
+getcap /usr/libexec/openkey-nonpreedit-server
+```
+
 Mặc định server im lặng. Bật log runtime khi cần debug:
 
 ```bash

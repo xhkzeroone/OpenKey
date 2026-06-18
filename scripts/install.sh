@@ -159,6 +159,12 @@ cmake_install
 if [[ "$(uname -s)" == "Linux" ]] && is_user_prefix; then
   echo "[openkey] Skipping uinput system setup for user-local prefix"
 elif [[ "$(uname -s)" == "Linux" ]]; then
+  nonpreedit_server="$PREFIX/libexec/openkey-nonpreedit-server"
+  if [[ -x "$nonpreedit_server" ]] && command -v setcap >/dev/null 2>&1; then
+    echo "[openkey] Granting priority capability to nonpreedit server (best-effort)"
+    sudo setcap cap_sys_nice+ep "$nonpreedit_server" >/dev/null 2>&1 || true
+  fi
+
   if [[ ! -e /dev/uinput ]]; then
     echo "[openkey] /dev/uinput missing; trying: sudo modprobe uinput (best-effort)"
     sudo modprobe uinput >/dev/null 2>&1 || true

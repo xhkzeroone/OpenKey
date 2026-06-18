@@ -12,9 +12,11 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <strings.h>
 #include <signal.h>
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -104,6 +106,21 @@
 #endif
 
 namespace openkey {
+
+#ifdef __linux__
+constexpr int kNonPreeditServerNiceValue = -10;
+
+static bool nonPreeditServerPriorityEnabled() {
+    const char *env = std::getenv("OPENKEY_NONPREEDIT_SERVER_PRIORITY");
+    if (!env || !*env) {
+        return true;
+    }
+    return std::strcmp(env, "0") != 0 &&
+           strcasecmp(env, "false") != 0 &&
+           strcasecmp(env, "no") != 0 &&
+           strcasecmp(env, "off") != 0;
+}
+#endif
 
 class RemoteNonPreeditCoordinator {
 public:
@@ -248,6 +265,11 @@ private:
             }
 #endif
             setsid();
+#ifdef __linux__
+            if (nonPreeditServerPriorityEnabled()) {
+                (void)setpriority(PRIO_PROCESS, 0, kNonPreeditServerNiceValue);
+            }
+#endif
             const int nullFd = ::open("/dev/null", O_RDWR);
             if (nullFd >= 0) {
                 dup2(nullFd, STDIN_FILENO);
@@ -1740,7 +1762,7 @@ public:
             return false;
         }
 
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        const uint32_t uni = fcitx::Key::keySymToUnicode(normKey.sym());
 
         if (!(uni >= 0x20 && uni <= 0x7E)) {
             clearWordState(deltaState);
@@ -1748,6 +1770,16 @@ public:
         }
 
         if (uni >= 0x20 && uni <= 0x7E) {
+            const char c = static_cast<char>(uni);
+            if (!isComposingASCII(c)) {
+                const bool handled =
+                    processQueuedKey(ic, state, key, adapterShared, debug);
+                if (handled) {
+                    event.filterAndAccept();
+                }
+                return handled;
+            }
+
             deltaState.queuedKeys.push_back(key);
             event.filterAndAccept();
             pumpQueue(ic, state, adapterShared, debug);
@@ -2303,7 +2335,8 @@ private:
             return false; // let app handle physical Backspace
         }
 
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        const auto normalizedKey = key.normalize();
+        const uint32_t uni = fcitx::Key::keySymToUnicode(normalizedKey.sym());
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 
@@ -2456,7 +2489,7 @@ public:
             return false;
         }
 
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
+        const uint32_t uni = fcitx::Key::keySymToUnicode(normKey.sym());
 
         if (!(uni >= 0x20 && uni <= 0x7E)) {
             clearComposeState(nonPreeditState, "non-printable-boundary");
@@ -2464,6 +2497,16 @@ public:
         }
 
         if (uni >= 0x20 && uni <= 0x7E) {
+            const char c = static_cast<char>(uni);
+            if (!isComposingASCII(c)) {
+                const bool handled =
+                    processNonPreeditKey(ic, state, key, adapterShared, debug);
+                if (handled) {
+                    event.filterAndAccept();
+                }
+                return handled;
+            }
+
             nonPreeditState.nonPreeditKeys.push_back(key);
             event.filterAndAccept();
             pumpNonPreedit(ic, state, adapterShared, debug);
@@ -2984,7 +3027,8 @@ private:
             return true;
         }
 
-        const uint32_t uni = fcitx::Key::keySymToUnicode(nonPreeditKey.sym());
+        const auto normalizedKey = nonPreeditKey.normalize();
+        const uint32_t uni = fcitx::Key::keySymToUnicode(normalizedKey.sym());
         if (uni >= 0x20 && uni <= 0x7E) {
             const char c = static_cast<char>(uni);
 

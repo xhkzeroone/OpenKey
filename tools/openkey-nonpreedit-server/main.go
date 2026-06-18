@@ -29,11 +29,33 @@ func envBool(name string) bool {
 	}
 }
 
+func envBoolDefault(name string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func logEvent(format string, args ...any) {
 	if !serverLogEnabled {
 		return
 	}
 	log.Printf("[nonpreedit-server] "+format, args...)
+}
+
+const priorityNiceValue = -10
+
+func enablePriorityMode() {
+	const prioProcess = 0
+	if err := syscall.Setpriority(prioProcess, 0, priorityNiceValue); err != nil {
+		logEvent("priority mode unavailable nice=%d err=%v", priorityNiceValue, err)
+		return
+	}
+	logEvent("priority mode enabled nice=%d", priorityNiceValue)
 }
 
 type planCommand struct {
@@ -433,7 +455,13 @@ func (s *connectionState) session(sessionID uint64) *sessionRunner {
 
 func main() {
 	socketPath := flag.String("socket", "/tmp/openkey-nonpreedit.sock", "unix socket path")
+	priority := flag.Bool("priority",
+		envBoolDefault("OPENKEY_NONPREEDIT_SERVER_PRIORITY", true),
+		"run with higher process priority when permitted")
 	flag.Parse()
+	if *priority {
+		enablePriorityMode()
+	}
 	uinput := newUinputDevice()
 	defer uinput.close()
 

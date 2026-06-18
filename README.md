@@ -260,7 +260,17 @@ FCITX_OPENKEY_DEBUG=1
 OPENKEY_NONPREEDIT_SERVER_LOG=1
 OPENKEY_NONPREEDIT_SERVER_SOCK=/tmp/openkey-nonpreedit.sock
 OPENKEY_NONPREEDIT_SERVER_BIN=/path/to/openkey-nonpreedit-server
+OPENKEY_NONPREEDIT_SERVER_PRIORITY=0
 ```
+
+Theo mặc định helper sẽ cố chạy với process priority cao hơn (`nice -10`) trên
+Linux. Việc này là best-effort: nếu tiến trình không có quyền `CAP_SYS_NICE`
+hoặc root thì kernel sẽ từ chối và helper vẫn chạy với priority hiện tại. Đặt
+`OPENKEY_NONPREEDIT_SERVER_PRIORITY=0` để tắt hành vi này.
+
+Script cài đặt và gói `.deb` sẽ cố cấp capability này bằng `setcap
+cap_sys_nice+ep /usr/libexec/openkey-nonpreedit-server`. Có thể kiểm tra bằng
+`getcap /usr/libexec/openkey-nonpreedit-server`.
 
 Khi `fcitx5` tắt bình thường, addon sẽ gửi `SIGTERM` và reap helper. Trên Linux, helper child cũng được gắn parent-death signal, nên nếu `fcitx5` thoát bất ngờ thì helper cũng nhận `SIGTERM`.
 
