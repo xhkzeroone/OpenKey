@@ -793,6 +793,29 @@ static bool isElectronLikeProgram(const std::string &program) {
     return false;
 }
 
+static bool isSurroundingTextAvailable(fcitx::InputContext *ic) {
+    if (!ic) {
+        return false;
+    }
+
+    if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        return false;
+    }
+
+    const auto &st = ic->surroundingText();
+
+    if (!st.isValid()) {
+        return false;
+    }
+
+    if (st.cursor() != st.anchor()) {
+        return false;
+    }
+
+    return true;
+}
+
+
 static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
                                          const std::string &program) {
     const bool x11 = isRunningOnX11(ic);
@@ -3366,11 +3389,25 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
     const bool snapshotEnabled = config_.enableBackspaceSnapshot.value();
-    const bool preserveDelta =
-        snapshotEnabled &&
-        state->delta.restoredFromBackspaceSnapshot &&
+
+    const bool firefoxResetKeepDelta =
+        isFirefoxLikeProgram(state->program) &&
+        state->mode == RuntimeMode::BackspaceRewriteDelta &&
         !state->delta.shownText.empty() &&
-        state->delta.allowBackspaceSnapshotResetPreserve;
+        !state->delta.rawAsciiBuffer.empty() &&
+        state->delta.shownText == state->delta.rawAsciiBuffer &&
+        !state->delta.rewriteLock &&
+        !state->delta.waitingBackspaceAck;
+
+    const bool preserveDelta =
+        firefoxResetKeepDelta ||
+        (
+            snapshotEnabled &&
+            state->delta.restoredFromBackspaceSnapshot &&
+            !state->delta.shownText.empty() &&
+            state->delta.allowBackspaceSnapshotResetPreserve
+        );
+
     const bool preserveDeltaSnapshot =
         snapshotEnabled &&
         !preserveDelta &&
@@ -3378,6 +3415,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         state->delta.preserveBackspaceSnapshotAfterBoundaryBackspace &&
         state->delta.canReseedFromBackspaceSnapshot &&
         !state->delta.backspaceSnapshotShownText.empty();
+
     const std::string deltaShown = state->delta.shownText;
     const std::string deltaRaw = state->delta.rawAsciiBuffer;
     const bool deltaRewritten = state->delta.hasRewrittenCurrentWord;
@@ -3387,11 +3425,24 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         state->delta.backspaceSnapshotRawAsciiBuffer;
     const bool deltaSnapshotRewritten =
         state->delta.backspaceSnapshotHasRewrittenCurrentWord;
-    const bool preserveNonPreedit =
-        snapshotEnabled &&
-        state->nonPreeditDelta.restoredFromBackspaceSnapshot &&
+
+    const bool firefoxResetKeepNonPreedit =
+        isFirefoxLikeProgram(state->program) &&
+        state->mode == RuntimeMode::NonPreeditBackspaceRewrite &&
         !state->nonPreeditDelta.shownText.empty() &&
-        state->nonPreeditDelta.allowBackspaceSnapshotResetPreserve;
+        !state->nonPreeditDelta.rawAsciiBuffer.empty() &&
+        state->nonPreeditDelta.shownText == state->nonPreeditDelta.rawAsciiBuffer &&
+        !state->nonPreeditDelta.rewriteLock;
+
+    const bool preserveNonPreedit =
+        firefoxResetKeepNonPreedit ||
+        (
+            snapshotEnabled &&
+            state->nonPreeditDelta.restoredFromBackspaceSnapshot &&
+            !state->nonPreeditDelta.shownText.empty() &&
+            state->nonPreeditDelta.allowBackspaceSnapshotResetPreserve
+        );
+
     const bool preserveNonPreeditSnapshot =
         snapshotEnabled &&
         !preserveNonPreedit &&
@@ -3399,6 +3450,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         state->nonPreeditDelta.preserveBackspaceSnapshotAfterBoundaryBackspace &&
         state->nonPreeditDelta.canReseedFromBackspaceSnapshot &&
         !state->nonPreeditDelta.backspaceSnapshotShownText.empty();
+
     const std::string nonPreeditShown = state->nonPreeditDelta.shownText;
     const std::string nonPreeditRaw = state->nonPreeditDelta.rawAsciiBuffer;
     const bool nonPreeditRewritten =
@@ -3409,16 +3461,20 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         state->nonPreeditDelta.backspaceSnapshotRawAsciiBuffer;
     const bool nonPreeditSnapshotRewritten =
         state->nonPreeditDelta.backspaceSnapshotHasRewrittenCurrentWord;
+
     if (debugEnabled()) {
         FCITX_INFO() << "openkey: reset"
                      << " program=" << state->program
                      << " snapshotEnabled=" << snapshotEnabled
+                     << " firefoxResetKeepDelta=" << firefoxResetKeepDelta
                      << " preserveDelta=" << preserveDelta
                      << " preserveDeltaSnapshot=" << preserveDeltaSnapshot
                      << " deltaAllowPreserve="
                      << state->delta.allowBackspaceSnapshotResetPreserve
                      << " deltaShown=" << state->delta.shownText
                      << " deltaRaw=" << state->delta.rawAsciiBuffer
+                     << " firefoxResetKeepNonPreedit="
+                     << firefoxResetKeepNonPreedit
                      << " preserveNonPreedit=" << preserveNonPreedit
                      << " preserveNonPreeditSnapshot="
                      << preserveNonPreeditSnapshot
@@ -3429,13 +3485,15 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                      << " nonPreeditRaw="
                      << state->nonPreeditDelta.rawAsciiBuffer;
     }
+
     state->delta.clear();
     state->nonPreeditDelta.clear();
+
     if (preserveDelta) {
         state->delta.shownText = deltaShown;
         state->delta.rawAsciiBuffer = deltaRaw;
         state->delta.hasRewrittenCurrentWord = deltaRewritten;
-        state->delta.restoredFromBackspaceSnapshot = true;
+        state->delta.restoredFromBackspaceSnapshot = false;  // Firefox giữ delta, không phải restore từ snapshot
         state->delta.allowBackspaceSnapshotResetPreserve = false;
         if (debugEnabled()) {
             FCITX_INFO() << "openkey: reset preserve"
@@ -3446,6 +3504,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                          << state->delta.hasRewrittenCurrentWord;
         }
     }
+
     if (preserveDeltaSnapshot) {
         state->delta.backspaceSnapshotShownText = deltaSnapshotShown;
         state->delta.backspaceSnapshotRawAsciiBuffer = deltaSnapshotRaw;
@@ -3463,11 +3522,12 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                          << state->delta.backspaceSnapshotRawAsciiBuffer;
         }
     }
+
     if (preserveNonPreedit) {
         state->nonPreeditDelta.shownText = nonPreeditShown;
         state->nonPreeditDelta.rawAsciiBuffer = nonPreeditRaw;
         state->nonPreeditDelta.hasRewrittenCurrentWord = nonPreeditRewritten;
-        state->nonPreeditDelta.restoredFromBackspaceSnapshot = true;
+        state->nonPreeditDelta.restoredFromBackspaceSnapshot = false;  // Firefox giữ delta, không phải restore từ snapshot
         state->nonPreeditDelta.allowBackspaceSnapshotResetPreserve = false;
         if (debugEnabled()) {
             FCITX_INFO() << "openkey: reset preserve"
@@ -3478,6 +3538,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                          << state->nonPreeditDelta.hasRewrittenCurrentWord;
         }
     }
+
     if (preserveNonPreeditSnapshot) {
         state->nonPreeditDelta.backspaceSnapshotShownText =
             nonPreeditSnapshotShown;
@@ -3498,12 +3559,14 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                          << state->nonPreeditDelta.backspaceSnapshotRawAsciiBuffer;
         }
     }
+
     state->composing.clear();
     state->preeditKeyBuffer.clear();
     state->macroBuffer.clear();
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
     state->rollbackRawBuffer.clear();
+
     ic->inputPanel().reset();
     ic->updatePreedit();
     ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
@@ -3531,10 +3594,18 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
             !hasNonPreeditServer) {
             return it->second;
         }
+        if (it->second == RuntimeMode::SurroundingText) {
+            if (isRunningOnX11(ic) && isSurroundingTextAvailable(ic)) {
+                return it->second;
+            }
+            // Fallback tạm thời, không writeBack để không mất config
+            return  nonPreeditServerAvailable() ? RuntimeMode::NonPreeditBackspaceRewrite : RuntimeMode::BackspaceRewriteDelta;
+        }
         if (it->second == RuntimeMode::Preedit ||
             it->second == RuntimeMode::DirectCommit) {
             return it->second;
         }
+    
         if (writeBack) {
             appModeMap[normalizedProgram] = RuntimeMode::Preedit;
             persistAppModes();
@@ -3542,7 +3613,15 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
         return RuntimeMode::Preedit;
     }
 
-    const auto mode = nonPreeditServerAvailable() ? RuntimeMode::NonPreeditBackspaceRewrite: RuntimeMode::BackspaceRewriteDelta;
+
+    RuntimeMode mode;
+    if (isFirefoxLikeProgram(s.program)) {
+        mode = RuntimeMode::Preedit;
+    } else if (isRunningOnX11(ic) && isSurroundingTextAvailable(ic)) {
+        mode = RuntimeMode::SurroundingText;
+    } else {
+        mode = nonPreeditServerAvailable() ? RuntimeMode::NonPreeditBackspaceRewrite : RuntimeMode::BackspaceRewriteDelta;
+    }
     if (writeBack && !normalizedProgram.empty()) {
         appModeMap[normalizedProgram] = mode;
         persistAppModes();
