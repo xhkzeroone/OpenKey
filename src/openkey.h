@@ -182,6 +182,10 @@ struct OpenKeyState : public fcitx::InputContextProperty {
     std::string rollbackWord;
     std::string rollbackDisplay;
     std::string rollbackRawBuffer;
+    std::string rollbackSnapshotWord;
+    std::string rollbackSnapshotDisplay;
+    std::string rollbackSnapshotRawBuffer;
+    bool canReseedRollbackSnapshot = false;
     bool noSeedNextWord = false;
     RuntimeMode mode = RuntimeMode::SurroundingText;
     RuntimeMode autoMode = RuntimeMode::SurroundingText;

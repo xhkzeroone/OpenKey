@@ -1194,6 +1194,7 @@ struct SimpleModeHandlerDeps {
     std::function<bool()> debugEnabled;
     std::function<bool()> enableMacro;
     std::function<bool()> restoreIfWrongSpelling;
+    std::function<bool()> enableBackspaceSnapshot;
 };
 
 // ---------------------------------------------------------------------------
@@ -1417,6 +1418,7 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             state.noSeedNextWord = false;
             return false;
         }
@@ -1428,6 +1430,7 @@ public:
                     state.rollbackWord.clear();
                     state.rollbackDisplay.clear();
                     state.rollbackRawBuffer.clear();
+                    clearRollbackSnapshot(state);
                     return false;
                 }
                 const auto len = fcitx::utf8::length(state.rollbackWord);
@@ -1447,6 +1450,7 @@ public:
                     state.rollbackWord.clear();
                     state.rollbackDisplay.clear();
                     state.rollbackRawBuffer.clear();
+                    clearRollbackSnapshot(state);
                     return false;
                 }
                 if (deleteChars > 0) {
@@ -1470,6 +1474,9 @@ public:
                 event.filterAndAccept();
                 return true;
             }
+            if (restoreRollbackSnapshotAfterBoundary(state, debug)) {
+                return false;
+            }
             if (!state.macroBuffer.empty()) {
                 state.macroBuffer.pop_back();
             }
@@ -1482,6 +1489,7 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             state.noSeedNextWord = false;
             return false;
         }
@@ -1492,6 +1500,7 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             state.noSeedNextWord = false;
             return false;
         }
@@ -1505,6 +1514,7 @@ public:
                 state.rollbackWord.clear();
                 state.rollbackDisplay.clear();
                 state.rollbackRawBuffer.clear();
+                clearRollbackSnapshot(state);
                 return false;
             }
             WordSegment seg;
@@ -1518,6 +1528,7 @@ public:
                 state.rollbackWord.clear();
                 state.rollbackDisplay.clear();
                 state.rollbackRawBuffer.clear();
+                clearRollbackSnapshot(state);
                 return false;
             }
         }
@@ -1568,10 +1579,11 @@ public:
             return replaceRollbackDisplay(restoredWord);
         };
 
-        if (c == ' ' || c == '\t') {
+        if (isBoundaryASCII(c)) {
             if (!expandMacroBeforeBoundary(c)) {
                 restoreBeforeBoundary(c);
             }
+            rememberRollbackSnapshot(state);
             state.macroBuffer.clear();
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
@@ -1588,12 +1600,14 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             state.noSeedNextWord = true;
             return false;
         }
 
         if (state.noSeedNextWord) {
             state.noSeedNextWord = false;
+            clearRollbackSnapshot(state);
         } else if (state.rollbackWord.empty()) {
             auto &st = ic->surroundingText();
             if (st.isValid() && st.cursor() == st.anchor()) {
@@ -1617,6 +1631,7 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             return false;
         }
         if (!fcitx::utf8::validate(r.newWord)) {
@@ -1627,6 +1642,7 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             return false;
         }
 
@@ -1644,6 +1660,7 @@ public:
             state.rollbackWord.clear();
             state.rollbackDisplay.clear();
             state.rollbackRawBuffer.clear();
+            clearRollbackSnapshot(state);
             return false;
         }
         if (deleteChars > 0) {
@@ -1672,10 +1689,59 @@ public:
         state.rollbackWord.clear();
         state.rollbackDisplay.clear();
         state.rollbackRawBuffer.clear();
+        clearRollbackSnapshot(state);
         state.noSeedNextWord = false;
     }
 
 private:
+    void clearRollbackSnapshot(OpenKeyState &state) const {
+        state.rollbackSnapshotWord.clear();
+        state.rollbackSnapshotDisplay.clear();
+        state.rollbackSnapshotRawBuffer.clear();
+        state.canReseedRollbackSnapshot = false;
+    }
+
+    void rememberRollbackSnapshot(OpenKeyState &state) const {
+        if (deps_.enableBackspaceSnapshot &&
+            !deps_.enableBackspaceSnapshot()) {
+            clearRollbackSnapshot(state);
+            return;
+        }
+        if (state.rollbackDisplay.empty()) {
+            clearRollbackSnapshot(state);
+            return;
+        }
+        state.rollbackSnapshotWord = state.rollbackWord;
+        state.rollbackSnapshotDisplay = state.rollbackDisplay;
+        state.rollbackSnapshotRawBuffer = state.rollbackRawBuffer;
+        state.canReseedRollbackSnapshot = true;
+    }
+
+    bool restoreRollbackSnapshotAfterBoundary(OpenKeyState &state,
+                                              bool debug) const {
+        if (deps_.enableBackspaceSnapshot &&
+            !deps_.enableBackspaceSnapshot()) {
+            clearRollbackSnapshot(state);
+            return false;
+        }
+        if (!state.canReseedRollbackSnapshot ||
+            state.rollbackSnapshotDisplay.empty()) {
+            return false;
+        }
+        state.rollbackWord = state.rollbackSnapshotWord;
+        state.rollbackDisplay = state.rollbackSnapshotDisplay;
+        state.rollbackRawBuffer = state.rollbackSnapshotRawBuffer;
+        state.noSeedNextWord = false;
+        clearRollbackSnapshot(state);
+        if (debug) {
+            FCITX_INFO() << "openkey: st snapshot restore"
+                         << " program=" << state.program
+                         << " rollbackDisplay=" << state.rollbackDisplay
+                         << " rollbackRaw=" << state.rollbackRawBuffer;
+        }
+        return true;
+    }
+
     SimpleModeHandlerDeps deps_;
 };
 
@@ -3182,6 +3248,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     simpleDeps.restoreIfWrongSpelling = [this]() {
         return config_.restoreIfWrongSpelling.value();
     };
+    simpleDeps.enableBackspaceSnapshot = [this]() {
+        return config_.enableBackspaceSnapshot.value();
+    };
     preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
     surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
     reloadConfig();
@@ -3494,6 +3563,10 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
     state->rollbackRawBuffer.clear();
+    state->rollbackSnapshotWord.clear();
+    state->rollbackSnapshotDisplay.clear();
+    state->rollbackSnapshotRawBuffer.clear();
+    state->canReseedRollbackSnapshot = false;
     state->noSeedNextWord = false;
     state->manualMode = false;
     state->modeDecided = false;
@@ -3721,6 +3794,10 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     state->rollbackWord.clear();
     state->rollbackDisplay.clear();
     state->rollbackRawBuffer.clear();
+    state->rollbackSnapshotWord.clear();
+    state->rollbackSnapshotDisplay.clear();
+    state->rollbackSnapshotRawBuffer.clear();
+    state->canReseedRollbackSnapshot = false;
 
     ic->inputPanel().reset();
     ic->updatePreedit();
@@ -3818,6 +3895,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 state->rollbackWord.clear();
                 state->rollbackDisplay.clear();
                 state->rollbackRawBuffer.clear();
+                state->rollbackSnapshotWord.clear();
+                state->rollbackSnapshotDisplay.clear();
+                state->rollbackSnapshotRawBuffer.clear();
+                state->canReseedRollbackSnapshot = false;
                 state->noSeedNextWord = false;
                 ic->inputPanel().reset();
                 ic->updatePreedit();
