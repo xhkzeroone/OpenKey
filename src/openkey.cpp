@@ -45,6 +45,9 @@
 
 #include "Macro.h"
 #include "openkey_adapter.h"
+#include "openkey_backspace_mode_handler.h"
+#include "openkey_fcitx_context.h"
+#include "openkey_platform.h"
 #include "surrounding_text_utils.h"
 
 #ifndef OPENKEY_NONPREEDIT_SERVER_PATH
@@ -122,12 +125,12 @@ static bool nonPreeditServerPriorityEnabled() {
 }
 #endif
 
-class RemoteNonPreeditCoordinator {
+class FcitxRemoteNonPreeditCoordinator {
 public:
     using DoneCallback =
         std::function<void(fcitx::InputContext *, uint64_t, uint64_t)>;
 
-    RemoteNonPreeditCoordinator(fcitx::EventLoop *loop, DoneCallback onDone,
+    FcitxRemoteNonPreeditCoordinator(fcitx::EventLoop *loop, DoneCallback onDone,
                            std::function<bool()> debugEnabled)
         : onDone_(std::move(onDone)),
           debugEnabled_(std::move(debugEnabled)) {
@@ -141,7 +144,7 @@ public:
             (serverEnv && *serverEnv) ? serverEnv : OPENKEY_NONPREEDIT_SERVER_PATH;
     }
 
-    ~RemoteNonPreeditCoordinator() {
+    ~FcitxRemoteNonPreeditCoordinator() {
         stop();
         dispatcher_.detach();
     }
@@ -434,22 +437,6 @@ private:
 
 namespace {
 
-static std::string utf8DropLastN(const std::string &s, size_t n) {
-    if (n == 0) {
-        return s;
-    }
-    if (!fcitx::utf8::validate(s)) {
-        return {};
-    }
-    const auto len = fcitx::utf8::length(s);
-    if (n >= len) {
-        return {};
-    }
-    const auto keep = len - n;
-    auto it = fcitx::utf8::nextNChar(s.begin(), keep);
-    return std::string(s.begin(), it);
-}
-
 static bool hasCtrlAltSuperMeta(const fcitx::Key &key) {
     const auto states = key.states();
     return states.test(fcitx::KeyState::Ctrl) || states.test(fcitx::KeyState::Alt) ||
@@ -458,41 +445,6 @@ static bool hasCtrlAltSuperMeta(const fcitx::Key &key) {
            states.test(fcitx::KeyState::Hyper) ||
            states.test(fcitx::KeyState::Super2) ||
            states.test(fcitx::KeyState::Hyper2);
-}
-
-static bool isComposingASCII(char c) {
-    // Restrict to keys relevant to OpenKey Telex/VNI processing.
-    // (Avoid swallowing punctuation that should be handled by application.)
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-        return true;
-    }
-    if (c >= '0' && c <= '9') {
-        return true;
-    }
-    if (c == '[' || c == ']') {
-        return true;
-    }
-    return false;
-}
-
-static bool isBoundaryASCII(char c) {
-    switch (c) {
-    case ' ':
-    case '.':
-    case ',':
-    case ';':
-    case ':':
-    case '?':
-    case '!':
-    case ')':
-    case ']':
-    case '}':
-    case '"':
-    case '\'':
-        return true;
-    default:
-        return false;
-    }
 }
 
 static char toLowerASCII(char c) {
@@ -595,36 +547,6 @@ static int toOpenKeyCodeTable(CodeTable table) {
     return 0;
 }
 
-struct RewriteTiming {
-    uint64_t interKeyUsec = 2000;
-    uint64_t commitDelayUsec = 60000;
-};
-
-struct DeltaRewriteTiming {
-    uint64_t interKeyUsec = 1000;
-    uint64_t commitDelayUsec = 1000;
-};
-
-// Delta timing tuned based on NonPreedit values
-// Format: {interKeyUsec, commitDelayUsec}
-static constexpr DeltaRewriteTiming kDeltaWaylandTiming{10000 , 50000};
-static constexpr DeltaRewriteTiming kDeltaWaylandBrowserTiming{10000, 50000};
-static constexpr DeltaRewriteTiming kDeltaWaylandElectronTiming{10000, 50000};
-static constexpr DeltaRewriteTiming kDeltaX11Timing{10000, 80000};
-static constexpr DeltaRewriteTiming kDeltaWaylandFcitx4Timing{10000, 50000};
-static constexpr DeltaRewriteTiming kDeltaX11Fcitx4Timing{10000, 80000};
-static constexpr DeltaRewriteTiming kDeltaX11BrowserTiming{10000, 80000};
-static constexpr DeltaRewriteTiming kDeltaX11FirefoxFarmilyTiming{30000, 80000};
-static constexpr DeltaRewriteTiming kDeltaWaylandFirefoxFarmilyTiming{20000, 50000};
-static constexpr uint64_t kDeltaPostCommitPumpDelayUsec = 10000;
-
-static constexpr RewriteTiming kNonPreeditWaylandTiming{10000, 30000};
-static constexpr RewriteTiming kNonPreeditWaylandFirefoxFarmilyTiming{20000, 50000};
-static constexpr RewriteTiming kNonPreeditX11Timing{10000, 80000};
-static constexpr RewriteTiming kNonPreeditX11BrowserTiming{10000, 80000};
-static constexpr RewriteTiming kNonPreeditX11FirefoxFarmilyTiming{30000, 80000};
-static constexpr uint64_t kNonPreeditPostCommitPumpDelayUsec = 10000;
-
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
 
@@ -638,13 +560,6 @@ static bool isRunningOnX11(fcitx::InputContext *ic) {
         return true;
     }
     return false;
-}
-
-static bool isFcitx4Frontend(fcitx::InputContext *ic) {
-    if (!ic || !ic->frontend()) {
-        return false;
-    }
-    return asciiLower(ic->frontend()).find("fcitx4") != std::string::npos;
 }
 
 static bool isFirefoxLikeProgram(const std::string &program) {
@@ -674,49 +589,6 @@ static bool isFirefoxLikeProgram(const std::string &program) {
 
 static bool needsTransientResetPreserve(const std::string &program) {
     return isFirefoxLikeProgram(program);
-}
-
-static bool isBrowserLikeProgram(const std::string &program) {
-    if (program.empty()) {
-        return false;
-    }
-
-    const std::string base = normalizedProgramName(program);
-    static const std::vector<std::string> kBrowserPatterns = {
-        "chrome",   "chromium", "edge",     "msedge",   "brave",
-        "vivaldi",  "opera",    "coccoc",   "yandex",   "firefox",
-        "librewolf","waterfox", "floorp",   "zen",      "epiphany",
-        "falkon",   "midori",   "qutebrowser", "palemoon", "basilisk",
-        "nyxt",     "otter",    "dooble",   "messenger", "helium",
-        "arc",       "mullvad",  "tor-browser", "torbrowser",
-        "code",      "code-oss", "vscode",   "codium",  "vscodium",
-        "vs-code",   "vs_code",  "vscoe",    "cursor",  "windsurf",
-        "antigravity", "kiro",   "trae",     "opencode", "open-code",
-        "claude-code", "codex",  "codex-cli", "gemini-cli",
-        "qwen-code", "aider",    "devin",    "devin-desktop",
-        "zed",       "zed-editor", "void",   "void-editor", "pearai",
-        "nimbalyst", "tabby",    "tabnine",  "continue", "cline",
-        "roo-code",  "github-copilot", "copilot", "replit",
-        "idea",      "intellij", "fleet",
-        "pycharm",   "webstorm", "phpstorm", "clion",   "goland",
-        "rubymine",  "rider",    "datagrip", "android-studio",
-        "dataspell", "rustrover", "aqua",    "appcode", "studio",
-        "eclipse",   "netbeans", "qtcreator", "qt-creator",
-        "kdevelop",  "gnome-builder", "builder", "geany", "codeblocks",
-        "code::blocks", "sublime_text", "sublime-text", "sublime",
-        "atom",      "lapce",    "lite-xl",  "lite_xl", "nova",
-        "kate",      "gedit",    "gnome-text-editor", "text-editor",
-        "texteditor", "emacs",   "vim",      "nvim",    "neovim",
-        "helix",     "hx",
-        "window:",
-    };
-
-    for (const auto &pattern : kBrowserPatterns) {
-        if (base.find(pattern) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
 }
 
 static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
@@ -798,27 +670,6 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
     return false;
 }
 
-static bool isElectronLikeProgram(const std::string &program) {
-    if (program.empty()) {
-        return false;
-    }
-
-    const std::string base = normalizedProgramName(program);
-    static const std::vector<std::string> kElectronPatterns = {
-        "electron", "code",     "vscode",   "codium",  "cursor",
-        "windsurf", "discord",  "slack",    "teams",   "obsidian",
-        "notion",   "signal",   "element",  "postman", "insomnia",
-        "figma",    "caprine",  "mattermost",
-    };
-
-    for (const auto &pattern : kElectronPatterns) {
-        if (base.find(pattern) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool isSurroundingTextAvailable(fcitx::InputContext *ic) {
     if (!ic) {
         return false;
@@ -868,64 +719,9 @@ static bool trackedWordStillBeforeCursor(fcitx::InputContext *ic,
 }
 
 
-static DeltaRewriteTiming deltaTimingFor(fcitx::InputContext *ic,
-                                         const std::string &program) {
-    const bool x11 = isRunningOnX11(ic);
-    const bool fcitx4 = isFcitx4Frontend(ic);
-
-    if (x11 && fcitx4) {
-        return kDeltaX11Fcitx4Timing;
-    }
-    if (!x11 && fcitx4) {
-        return kDeltaWaylandFcitx4Timing;
-    }
-    if(x11 && isFirefoxLikeProgram(program)) {
-        return kDeltaX11FirefoxFarmilyTiming;
-    }
-
-    if(!x11 && isFirefoxLikeProgram(program)) {
-        return kDeltaWaylandFirefoxFarmilyTiming;
-    }
-    if (!x11 && isBrowserLikeProgram(program)) {
-        return kDeltaWaylandBrowserTiming;
-    }
-    if (!x11 && isElectronLikeProgram(program)) {
-        return kDeltaWaylandElectronTiming;
-    }
-    if (x11 && isBrowserLikeProgram(program)) {
-        return kDeltaX11BrowserTiming;
-    }
-    if (x11) {
-        return kDeltaX11Timing;
-    }
-    return kDeltaWaylandTiming;
-}
-
-static RewriteTiming nonPreeditTimingFor(fcitx::InputContext *ic,
-                                         const std::string &program) {
-    const bool x11 = isRunningOnX11(ic);
-
-    if(x11 && isFirefoxLikeProgram(program)) {
-        return kNonPreeditX11FirefoxFarmilyTiming;
-    }
-
-    if(!x11 && isFirefoxLikeProgram(program)) {
-        return kNonPreeditWaylandFirefoxFarmilyTiming;
-    }
-
-    if (x11 && isBrowserLikeProgram(program)) {
-        return kNonPreeditX11BrowserTiming;
-    }
-
-    if (x11) {
-        return kNonPreeditX11Timing;
-    }
-    return kNonPreeditWaylandTiming;
-}
-
-class BackspaceInjector {
+class FcitxBackspaceInjector {
 public:
-    ~BackspaceInjector() { destroyUinput(); }
+    ~FcitxBackspaceInjector() { destroyUinput(); }
 
     enum class Method {
         Uinput,
@@ -1059,58 +855,7 @@ private:
 #endif
 };
 
-static BackspaceInjector g_backspaceInjector;
-
-static void forwardKeyPressAndRelease(fcitx::InputContext *ic,
-                                      const fcitx::Key &key) {
-    if (!ic) {
-        return;
-    }
-    ic->forwardKey(key);
-    ic->forwardKey(key, true);
-}
-
-static std::size_t commonPrefixBytesUTF8Boundary(const std::string &s1,
-                                                 const std::string &s2) {
-    std::size_t n = std::min(s1.size(), s2.size());
-    std::size_t i = 0;
-    while (i < n && s1[i] == s2[i]) {
-        ++i;
-    }
-    // Ensure i is a valid UTF-8 boundary in s1.
-    // If i points into a continuation byte (10xxxxxx), backtrack.
-    while (i > 0 && i < s1.size() &&
-           (static_cast<unsigned char>(s1[i]) & 0xC0u) == 0x80u) {
-        --i;
-    }
-    return i;
-}
-
-static unsigned int utf8CharCount(const std::string &s) {
-    if (!fcitx::utf8::validate(s)) {
-        return 0;
-    }
-    return static_cast<unsigned int>(fcitx::utf8::length(s));
-}
-
-static bool isMacroTriggerKey(char c) {
-    if (c == ' ') {
-        return true;
-    }
-    switch (c) {
-    case ',':
-    case '.':
-    case '/':
-    case ';':
-    case '\'':
-    case '\\':
-    case '-':
-    case '=':
-        return true;
-    default:
-        return false;
-    }
-}
+static FcitxBackspaceInjector g_backspaceInjector;
 
 } // namespace
 
@@ -1120,9 +865,9 @@ constexpr const char *kBridgeObjectPath = "/org/openkey/Bridge";
 constexpr const char *kBridgeInterface = "org.openkey.Bridge1";
 } // namespace
 
-class FocusedAppBridge {
+class FcitxFocusedAppBridge {
 public:
-    FocusedAppBridge(fcitx::EventLoop *loop,
+    FcitxFocusedAppBridge(fcitx::EventLoop *loop,
                      std::function<bool()> debugEnabled)
         : bus_(fcitx::dbus::BusType::Session),
           debugEnabled_(std::move(debugEnabled)) {
@@ -1131,7 +876,7 @@ public:
         }
     }
 
-    ~FocusedAppBridge() {
+    ~FcitxFocusedAppBridge() {
         if (bus_.isOpen()) {
             bus_.detachEventLoop();
         }
@@ -1168,2038 +913,23 @@ private:
     std::function<bool()> debugEnabled_;
 };
 
-namespace {
 
 
-
-struct DeltaModeDeps {
-    fcitx::Instance *instance = nullptr;
-    fcitx::SimpleInputContextPropertyFactory<OpenKeyState> *factory = nullptr;
-    std::shared_ptr<OpenKeyAdapter> adapter;
-    BackspaceInjector *backspaceInjector = nullptr;
-    std::weak_ptr<void> lifetimeWeak;
-    std::function<bool()> debugEnabled;
-    std::function<bool()> enableMacro;
-    std::function<bool()> restoreIfWrongSpelling;
-    std::function<bool()> enableBackspaceSnapshot;
-    std::function<bool()> nonPreeditRemoteEnabled;
-    std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
-                       uint64_t, uint64_t)>
-        nonPreeditRemoteSchedule;
-};
-
-// Deps shared by PreeditModeHandler and SurroundingTextModeHandler.
-struct SimpleModeHandlerDeps {
-    std::shared_ptr<OpenKeyAdapter> adapter;
-    std::function<bool()> debugEnabled;
-    std::function<bool()> enableMacro;
-    std::function<bool()> restoreIfWrongSpelling;
-    std::function<bool()> enableBackspaceSnapshot;
-};
-
-// ---------------------------------------------------------------------------
-// PreeditModeHandler
-// ---------------------------------------------------------------------------
-
-class PreeditModeHandler final : public InputModeHandler {
-public:
-    explicit PreeditModeHandler(SimpleModeHandlerDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-
-        auto commitPreeditAndMaybeAppend = [&](const std::string &suffixUtf8) {
-            if (state.composing.empty()) {
-                return false;
-            }
-            std::string out = state.composing;
-            out += suffixUtf8;
-            ic->commitString(out);
-            state.lastCommitted = state.composing;
-            state.composing.clear();
-            state.preeditKeyBuffer.clear();
-            updatePreeditUI(ic, state);
-            event.filterAndAccept();
-            return true;
-        };
-
-        // Navigation / editing keys terminate preedit but are handled by app.
-        if (key.isCursorMove() || key.check(FcitxKey_Delete) ||
-            key.check(FcitxKey_Tab)) {
-            commitAndClearPreedit(ic, state);
-            return false;
-        }
-
-        if (key.check(FcitxKey_BackSpace)) {
-            if (!state.composing.empty()) {
-                const auto len = fcitx::utf8::length(state.composing);
-                if (len > 0) {
-                    auto it = fcitx::utf8::nextNChar(state.composing.begin(), len - 1);
-                    state.composing.erase(it, state.composing.end());
-                } else {
-                    state.composing.clear();
-                }
-                if (!state.preeditKeyBuffer.empty()) {
-                    state.preeditKeyBuffer.pop_back();
-                }
-                updatePreeditUI(ic, state);
-                event.filterAndAccept();
-                return true;
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Escape)) {
-            if (!state.composing.empty()) {
-                state.composing.clear();
-                state.preeditKeyBuffer.clear();
-                updatePreeditUI(ic, state);
-                event.filterAndAccept();
-                return true;
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-            key.check(FcitxKey_ISO_Enter)) {
-            commitAndClearPreedit(ic, state);
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-        const std::string utf8 = fcitx::Key::keySymToUTF8(key.sym());
-
-        if (!state.composing.empty() && (utf8.empty() || uni > 0x7F)) {
-            commitAndClearPreedit(ic, state);
-            return false;
-        }
-
-        auto expandMacroBeforeBoundary = [&](char trigger) {
-            if (!deps_.enableMacro || !deps_.enableMacro() ||
-                !isMacroTriggerKey(trigger) || state.composing.empty()) {
-                return false;
-            }
-            std::string replacement;
-            if (!deps_.adapter->expandMacro(state.composing, replacement)) {
-                return false;
-            }
-            state.composing = std::move(replacement);
-            return true;
-        };
-
-        auto restoreBeforeBoundary = [&](char trigger) {
-            if (!deps_.restoreIfWrongSpelling ||
-                !deps_.restoreIfWrongSpelling() || state.composing.empty()) {
-                return false;
-            }
-            std::string restoredWord;
-            const bool restored =
-                !state.preeditKeyBuffer.empty()
-                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
-                          state.composing, state.preeditKeyBuffer, trigger,
-                          restoredWord)
-                    : deps_.adapter->restoreOnWordBreak(state.composing, trigger,
-                                                       restoredWord);
-            if (!restored) {
-                return false;
-            }
-            state.composing = std::move(restoredWord);
-            return true;
-        };
-
-        if (uni >= 0x20 && uni <= 0x7E) {
-            const char c = static_cast<char>(uni);
-
-            if (c == ' ') {
-                if (!expandMacroBeforeBoundary(c)) {
-                    restoreBeforeBoundary(c);
-                }
-                return commitPreeditAndMaybeAppend(" ");
-            }
-            if (!isComposingASCII(c)) {
-                const std::string boundaryUtf8 = fcitx::Key::keySymToUTF8(key.sym());
-                if (!expandMacroBeforeBoundary(c)) {
-                    restoreBeforeBoundary(c);
-                }
-                if (!boundaryUtf8.empty()) {
-                    return commitPreeditAndMaybeAppend(boundaryUtf8);
-                }
-                commitAndClearPreedit(ic, state);
-                return false;
-            }
-
-            auto r = deps_.adapter->processAsciiKey(state.composing, c);
-            if (!r.handled) {
-                return false;
-            }
-            state.composing = std::move(r.newWord);
-            state.preeditKeyBuffer.push_back(c);
-            updatePreeditUI(ic, state);
-            event.filterAndAccept();
-            return true;
-        }
-
-        return false;
-    }
-
-    void reset(OpenKeyState &state) override {
-        state.composing.clear();
-        state.preeditKeyBuffer.clear();
-    }
-
-private:
-    void updatePreeditUI(fcitx::InputContext *ic, const OpenKeyState &state) {
-        auto &panel = ic->inputPanel();
-        panel.reset();
-
-        if (state.composing.empty()) {
-            ic->updatePreedit();
-            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
-            return;
-        }
-
-        fcitx::Text text;
-        text.append(state.composing);
-        text.setCursor(static_cast<int>(state.composing.size()));
-
-        if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
-            panel.setClientPreedit(text);
-        } else {
-            panel.setPreedit(text);
-        }
-
-        ic->updatePreedit();
-        ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
-    }
-
-    void commitAndClearPreedit(fcitx::InputContext *ic, OpenKeyState &state) {
-        if (state.composing.empty()) {
-            return;
-        }
-        ic->commitString(state.composing);
-        state.lastCommitted = state.composing;
-        state.composing.clear();
-        state.preeditKeyBuffer.clear();
-        updatePreeditUI(ic, state);
-    }
-
-    SimpleModeHandlerDeps deps_;
-};
-
-// ---------------------------------------------------------------------------
-// SurroundingTextModeHandler
-// ---------------------------------------------------------------------------
-
-class SurroundingTextModeHandler final : public InputModeHandler {
-public:
-    explicit SurroundingTextModeHandler(SimpleModeHandlerDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-                   OpenKeyState &state) override {
-        auto key = event.key().normalize();
-
-        // Preedit buffer should be empty in surrounding mode.
-        state.composing.clear();
-
-        const bool debug = deps_.debugEnabled && deps_.debugEnabled();
-
-        if (debug) {
-            FCITX_INFO() << "openkey: st key program=" << state.program
-                         << " sym=" << key.sym()
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " rollbackWord=" << state.rollbackWord;
-        }
-
-        if (key.check(FcitxKey_Delete) || key.isCursorMove()) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        if (key.check(FcitxKey_BackSpace)) {
-            if (!state.rollbackWord.empty()) {
-                if (!fcitx::utf8::validate(state.rollbackWord) ||
-                    !fcitx::utf8::validate(state.rollbackDisplay)) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    state.rollbackRawBuffer.clear();
-                    clearRollbackSnapshot(state);
-                    return false;
-                }
-                const auto len = fcitx::utf8::length(state.rollbackWord);
-                if (len > 0) {
-                    auto it = fcitx::utf8::nextNChar(state.rollbackWord.begin(), len - 1);
-                    state.rollbackWord.erase(it, state.rollbackWord.end());
-                } else {
-                    state.rollbackWord.clear();
-                }
-
-                std::string newDisplay = state.rollbackWord;
-                const std::size_t prefixLen =
-                    commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newDisplay);
-                const unsigned int deleteChars =
-                    utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-                if (deleteChars > 128) {
-                    state.rollbackWord.clear();
-                    state.rollbackDisplay.clear();
-                    state.rollbackRawBuffer.clear();
-                    clearRollbackSnapshot(state);
-                    return false;
-                }
-                if (deleteChars > 0) {
-                    ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-                }
-                if (newDisplay.size() > prefixLen) {
-                    ic->commitString(newDisplay.substr(prefixLen));
-                }
-                state.rollbackDisplay = std::move(newDisplay);
-                if (!state.rollbackRawBuffer.empty()) {
-                    state.rollbackRawBuffer.pop_back();
-                }
-                if (state.rollbackDisplay.empty()) {
-                    state.rollbackRawBuffer.clear();
-                }
-                if (debug) {
-                    FCITX_INFO() << "openkey: st bs program=" << state.program
-                                 << " deleteChars=" << deleteChars
-                                 << " newDisplay=" << state.rollbackDisplay;
-                }
-                event.filterAndAccept();
-                return true;
-            }
-            if (restoreRollbackSnapshotAfterBoundary(state, debug)) {
-                return false;
-            }
-            if (!state.macroBuffer.empty()) {
-                state.macroBuffer.pop_back();
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter) ||
-            key.check(FcitxKey_ISO_Enter)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = false;
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-        if (!(uni >= 0x20 && uni <= 0x7E)) {
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = false;
-            return false;
-        }
-        const char c = static_cast<char>(uni);
-
-        if (isComposingASCII(c) && !state.rollbackDisplay.empty()) {
-            const auto &st = ic->surroundingText();
-            if (!st.isValid() || st.cursor() != st.anchor() ||
-                !fcitx::utf8::validate(st.text()) ||
-                st.cursor() > fcitx::utf8::length(st.text())) {
-                state.rollbackWord.clear();
-                state.rollbackDisplay.clear();
-                state.rollbackRawBuffer.clear();
-                clearRollbackSnapshot(state);
-                return false;
-            }
-            WordSegment seg;
-            if (!extractWordBeforeCursor(st.text(), st.cursor(), seg) ||
-                seg.word != state.rollbackDisplay) {
-                if (debug) {
-                    FCITX_INFO() << "openkey: st desync program=" << state.program
-                                 << " expected=" << state.rollbackDisplay
-                                 << " actual=" << seg.word;
-                }
-                state.rollbackWord.clear();
-                state.rollbackDisplay.clear();
-                state.rollbackRawBuffer.clear();
-                clearRollbackSnapshot(state);
-                return false;
-            }
-        }
-
-        auto replaceRollbackDisplay = [&](const std::string &replacement) {
-            const unsigned int deleteChars = utf8CharCount(state.rollbackDisplay);
-            if (deleteChars == 0 || deleteChars > 128) {
-                return false;
-            }
-            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-            ic->commitString(replacement);
-            state.rollbackWord = replacement;
-            state.rollbackDisplay = replacement;
-            state.rollbackRawBuffer.clear();
-            state.lastCommitted = replacement;
-            return true;
-        };
-
-        auto expandMacroBeforeBoundary = [&](char trigger) {
-            if (!deps_.enableMacro || !deps_.enableMacro() ||
-                !isMacroTriggerKey(trigger) || state.rollbackDisplay.empty()) {
-                return false;
-            }
-            std::string replacement;
-            if (!deps_.adapter->expandMacro(state.rollbackDisplay, replacement)) {
-                return false;
-            }
-            return replaceRollbackDisplay(replacement);
-        };
-
-        auto restoreBeforeBoundary = [&](char trigger) {
-            if (!deps_.restoreIfWrongSpelling ||
-                !deps_.restoreIfWrongSpelling() ||
-                state.rollbackDisplay.empty()) {
-                return false;
-            }
-            std::string restoredWord;
-            const bool restored =
-                !state.rollbackRawBuffer.empty()
-                    ? deps_.adapter->restoreFromRawAsciiOnWordBreak(
-                          state.rollbackDisplay, state.rollbackRawBuffer, trigger,
-                          restoredWord)
-                    : deps_.adapter->restoreOnWordBreak(state.rollbackDisplay,
-                                                       trigger, restoredWord);
-            if (!restored) {
-                return false;
-            }
-            return replaceRollbackDisplay(restoredWord);
-        };
-
-        if (isBoundaryASCII(c)) {
-            if (!expandMacroBeforeBoundary(c)) {
-                restoreBeforeBoundary(c);
-            }
-            rememberRollbackSnapshot(state);
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (!isComposingASCII(c)) {
-            if (!expandMacroBeforeBoundary(c)) {
-                restoreBeforeBoundary(c);
-            }
-            state.macroBuffer.clear();
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            state.noSeedNextWord = true;
-            return false;
-        }
-
-        if (state.noSeedNextWord) {
-            state.noSeedNextWord = false;
-            clearRollbackSnapshot(state);
-        } else if (state.rollbackWord.empty()) {
-            auto &st = ic->surroundingText();
-            if (st.isValid() && st.cursor() == st.anchor()) {
-                WordSegment seg;
-                if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
-                    state.rollbackWord = seg.word;
-                    state.rollbackDisplay = seg.word;
-                    state.rollbackRawBuffer.clear();
-                    if (debug) {
-                        FCITX_INFO() << "openkey: st seed program=" << state.program
-                                     << " st.cursor=" << st.cursor()
-                                     << " st.textLen=" << fcitx::utf8::length(st.text())
-                                     << " seed=" << seg.word;
-                    }
-                }
-            }
-        }
-
-        auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
-        if (!r.handled) {
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            return false;
-        }
-        if (!fcitx::utf8::validate(r.newWord)) {
-            if (debug) {
-                FCITX_WARN() << "openkey: invalid utf8 from adapter program="
-                             << state.program;
-            }
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            return false;
-        }
-
-        const std::size_t prefixLen =
-            commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
-        const unsigned int deleteChars =
-            utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-        if (deleteChars > 128) {
-            if (debug) {
-                FCITX_WARN() << "openkey: deleteChars too large program="
-                             << state.program << " deleteChars=" << deleteChars
-                             << " rollbackDisplay=" << state.rollbackDisplay
-                             << " newWord=" << r.newWord;
-            }
-            state.rollbackWord.clear();
-            state.rollbackDisplay.clear();
-            state.rollbackRawBuffer.clear();
-            clearRollbackSnapshot(state);
-            return false;
-        }
-        if (deleteChars > 0) {
-            ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        }
-        if (r.newWord.size() > prefixLen) {
-            ic->commitString(r.newWord.substr(prefixLen));
-        }
-        if (debug) {
-            FCITX_INFO() << "openkey: st apply program=" << state.program
-                         << " deleteChars=" << deleteChars
-                         << " commitDelta=" << r.newWord.substr(prefixLen)
-                         << " newWord=" << r.newWord;
-        }
-
-        state.rollbackWord = r.newWord;
-        state.rollbackDisplay = r.newWord;
-        state.rollbackRawBuffer.push_back(c);
-        state.lastCommitted = state.rollbackDisplay;
-        event.filterAndAccept();
-        return true;
-    }
-
-    void reset(OpenKeyState &state) override {
-        state.macroBuffer.clear();
-        state.rollbackWord.clear();
-        state.rollbackDisplay.clear();
-        state.rollbackRawBuffer.clear();
-        clearRollbackSnapshot(state);
-        state.noSeedNextWord = false;
-    }
-
-private:
-    void clearRollbackSnapshot(OpenKeyState &state) const {
-        state.rollbackSnapshotWord.clear();
-        state.rollbackSnapshotDisplay.clear();
-        state.rollbackSnapshotRawBuffer.clear();
-        state.canReseedRollbackSnapshot = false;
-    }
-
-    void rememberRollbackSnapshot(OpenKeyState &state) const {
-        if (deps_.enableBackspaceSnapshot &&
-            !deps_.enableBackspaceSnapshot()) {
-            clearRollbackSnapshot(state);
-            return;
-        }
-        if (state.rollbackDisplay.empty()) {
-            clearRollbackSnapshot(state);
-            return;
-        }
-        state.rollbackSnapshotWord = state.rollbackWord;
-        state.rollbackSnapshotDisplay = state.rollbackDisplay;
-        state.rollbackSnapshotRawBuffer = state.rollbackRawBuffer;
-        state.canReseedRollbackSnapshot = true;
-    }
-
-    bool restoreRollbackSnapshotAfterBoundary(OpenKeyState &state,
-                                              bool debug) const {
-        if (deps_.enableBackspaceSnapshot &&
-            !deps_.enableBackspaceSnapshot()) {
-            clearRollbackSnapshot(state);
-            return false;
-        }
-        if (!state.canReseedRollbackSnapshot ||
-            state.rollbackSnapshotDisplay.empty()) {
-            return false;
-        }
-        state.rollbackWord = state.rollbackSnapshotWord;
-        state.rollbackDisplay = state.rollbackSnapshotDisplay;
-        state.rollbackRawBuffer = state.rollbackSnapshotRawBuffer;
-        state.noSeedNextWord = false;
-        clearRollbackSnapshot(state);
-        if (debug) {
-            FCITX_INFO() << "openkey: st snapshot restore"
-                         << " program=" << state.program
-                         << " rollbackDisplay=" << state.rollbackDisplay
-                         << " rollbackRaw=" << state.rollbackRawBuffer;
-        }
-        return true;
-    }
-
-    SimpleModeHandlerDeps deps_;
-};
-
-class BackspaceRewriteModeHandler final : public InputModeHandler {
-public:
-    explicit BackspaceRewriteModeHandler(DeltaModeDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-               OpenKeyState &state) override {
-        auto key = event.rawKey();
-        auto normKey = event.key().normalize();
-
-        auto isBackspace = [&]() {
-            return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
-        };
-
-        if (event.isRelease()) {
-            return false;
-        }
-
-        if (hasCtrlAltSuperMeta(key)) {
-            return false;
-        }
-
-        const auto adapterShared = deps_.adapter;
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        auto &deltaState = state.delta;
-
-        if (deltaState.waitingBackspaceAck) {
-            if (isBackspace()) {
-                deltaState.seenBackspaces++;
-                if (deltaState.seenBackspaces < deltaState.expectedBackspaces) {
-                    return false;
-                }
-
-                deltaState.ackTimeoutTimer.reset();
-                event.filterAndAccept();
-
-                const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
-                scheduleFinishPendingBackspaceCommit(ic, state,
-                                                     timing.commitDelayUsec);
-                return true;
-            }
-
-            deltaState.queuedKeys.push_back(key);
-            event.filterAndAccept();
-            return true;
-        }
-
-        if (deltaState.rewriteLock) {
-            deltaState.queuedKeys.push_back(key);
-            event.filterAndAccept();
-            return true;
-        }
-
-        if (isBackspace()) {
-            if (needsTransientResetPreserve(state.program) &&
-                !deltaState.shownText.empty() &&
-                !trackedWordStillBeforeCursor(ic, deltaState.shownText, false)) {
-                clearWordState(deltaState);
-                return false;
-            }
-            if (restoreBackspaceSnapshot(deltaState)) {
-                return true;
-            }
-            if (!deltaState.shownText.empty()) {
-                deltaState.shownText = utf8DropLastN(deltaState.shownText, 1);
-                if (!deltaState.rawAsciiBuffer.empty()) {
-                    deltaState.rawAsciiBuffer.pop_back();
-                }
-                if (deltaState.shownText.empty()) {
-                    deltaState.rawAsciiBuffer.clear();
-                    deltaState.hasRewrittenCurrentWord = false;
-                }
-                deltaState.allowTransientResetPreserve =
-                    !deltaState.shownText.empty();
-            }
-            return false;
-        }
-
-        if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
-            normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(normKey.sym());
-
-        if (!(uni >= 0x20 && uni <= 0x7E)) {
-            clearWordState(deltaState);
-            return false;
-        }
-
-        if (uni >= 0x20 && uni <= 0x7E) {
-            const char c = static_cast<char>(uni);
-            if (!isComposingASCII(c)) {
-                const bool handled =
-                    processQueuedKey(ic, state, key, adapterShared, debug);
-                if (handled) {
-                    event.filterAndAccept();
-                }
-                return handled;
-            }
-
-            deltaState.queuedKeys.push_back(key);
-            event.filterAndAccept();
-            pumpQueue(ic, state, adapterShared, debug);
-            return true;
-        }
-
-        if (key.isCursorMove() || normKey.isCursorMove() ||
-            key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
-            key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-            clearWordState(deltaState);
-        }
-
-        return false;
-    }
-
-private:
-    OpenKeyState *stateFor(fcitx::InputContext *ic) const {
-        if (!ic || !deps_.factory) {
-            return nullptr;
-        }
-        return ic->propertyFor(deps_.factory);
-    }
-
-    bool backspaceSnapshotEnabled() const {
-        return !deps_.enableBackspaceSnapshot ||
-               deps_.enableBackspaceSnapshot();
-    }
-
-    void clearBackspaceSnapshot(DeltaRewriteState &deltaState) const {
-        const bool hadSnapshot =
-            deltaState.canReseedFromBackspaceSnapshot ||
-            !deltaState.backspaceSnapshotShownText.empty() ||
-            !deltaState.backspaceSnapshotRawAsciiBuffer.empty() ||
-            deltaState.preserveBackspaceSnapshotAfterBoundaryBackspace;
-        if (hadSnapshot && deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-snapshot clear"
-                         << " mode=backspace"
-                         << " shown=" << deltaState.shownText
-                         << " snapshotShown="
-                         << deltaState.backspaceSnapshotShownText
-                         << " snapshotRaw="
-                         << deltaState.backspaceSnapshotRawAsciiBuffer
-                         << " canReseed="
-                         << deltaState.canReseedFromBackspaceSnapshot
-                         << " preserveAfterBoundaryBackspace="
-                         << deltaState.preserveBackspaceSnapshotAfterBoundaryBackspace;
-        }
-        deltaState.backspaceSnapshotShownText.clear();
-        deltaState.backspaceSnapshotRawAsciiBuffer.clear();
-        deltaState.backspaceSnapshotHasRewrittenCurrentWord = false;
-        deltaState.canReseedFromBackspaceSnapshot = false;
-        deltaState.preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-        deltaState.allowBackspaceSnapshotResetPreserve = false;
-    }
-
-    void rememberBackspaceSnapshot(DeltaRewriteState &deltaState) const {
-        if (!backspaceSnapshotEnabled()) {
-            clearBackspaceSnapshot(deltaState);
-            return;
-        }
-        if (deltaState.shownText.empty()) {
-            if (deltaState.canReseedFromBackspaceSnapshot &&
-                !deltaState.backspaceSnapshotShownText.empty()) {
-                deltaState.preserveBackspaceSnapshotAfterBoundaryBackspace = true;
-                if (deps_.debugEnabled && deps_.debugEnabled()) {
-                    FCITX_INFO() << "openkey: bs-snapshot remember-boundary"
-                                 << " mode=backspace"
-                                 << " snapshotShown="
-                                 << deltaState.backspaceSnapshotShownText
-                                 << " snapshotRaw="
-                                 << deltaState.backspaceSnapshotRawAsciiBuffer;
-                }
-                return;
-            }
-            if (deps_.debugEnabled && deps_.debugEnabled()) {
-                FCITX_INFO() << "openkey: bs-snapshot remember-skip"
-                             << " mode=backspace"
-                             << " reason=empty-shown"
-                             << " snapshotShown="
-                             << deltaState.backspaceSnapshotShownText
-                             << " canReseed="
-                             << deltaState.canReseedFromBackspaceSnapshot;
-            }
-            clearBackspaceSnapshot(deltaState);
-            return;
-        }
-        deltaState.backspaceSnapshotShownText = deltaState.shownText;
-        deltaState.backspaceSnapshotRawAsciiBuffer = deltaState.rawAsciiBuffer;
-        deltaState.backspaceSnapshotHasRewrittenCurrentWord =
-            deltaState.hasRewrittenCurrentWord;
-        deltaState.canReseedFromBackspaceSnapshot = true;
-        deltaState.preserveBackspaceSnapshotAfterBoundaryBackspace = true;
-        if (deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-snapshot remember"
-                         << " mode=backspace"
-                         << " shown=" << deltaState.shownText
-                         << " raw=" << deltaState.rawAsciiBuffer
-                         << " rewritten="
-                         << deltaState.hasRewrittenCurrentWord;
-        }
-    }
-
-    bool restoreBackspaceSnapshot(DeltaRewriteState &deltaState) const {
-        if (!backspaceSnapshotEnabled()) {
-            clearBackspaceSnapshot(deltaState);
-            return false;
-        }
-        if (!deltaState.canReseedFromBackspaceSnapshot ||
-            !deltaState.shownText.empty() ||
-            deltaState.backspaceSnapshotShownText.empty()) {
-            if (deps_.debugEnabled && deps_.debugEnabled()) {
-                FCITX_INFO() << "openkey: bs-snapshot restore-miss"
-                             << " mode=backspace"
-                             << " shown=" << deltaState.shownText
-                             << " snapshotShown="
-                             << deltaState.backspaceSnapshotShownText
-                             << " snapshotRaw="
-                             << deltaState.backspaceSnapshotRawAsciiBuffer
-                             << " canReseed="
-                             << deltaState.canReseedFromBackspaceSnapshot;
-            }
-            return false;
-        }
-        deltaState.shownText = deltaState.backspaceSnapshotShownText;
-        deltaState.rawAsciiBuffer = deltaState.backspaceSnapshotRawAsciiBuffer;
-        deltaState.hasRewrittenCurrentWord =
-            deltaState.backspaceSnapshotHasRewrittenCurrentWord;
-        deltaState.restoredFromBackspaceSnapshot = true;
-        deltaState.allowBackspaceSnapshotResetPreserve = true;
-        if (deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-snapshot restore"
-                         << " mode=backspace"
-                         << " shown=" << deltaState.shownText
-                         << " raw=" << deltaState.rawAsciiBuffer
-                         << " rewritten="
-                         << deltaState.hasRewrittenCurrentWord;
-        }
-        clearBackspaceSnapshot(deltaState);
-        deltaState.allowBackspaceSnapshotResetPreserve = true;
-        return true;
-    }
-
-    void clearWordState(DeltaRewriteState &deltaState,
-                        bool clearSnapshot = true) const {
-        deltaState.shownText.clear();
-        deltaState.rawAsciiBuffer.clear();
-        deltaState.hasRewrittenCurrentWord = false;
-        deltaState.restoredFromBackspaceSnapshot = false;
-        deltaState.allowBackspaceSnapshotResetPreserve = false;
-        deltaState.allowTransientResetPreserve = false;
-        deltaState.rewriteLock = false;
-        deltaState.waitingBackspaceAck = false;
-        deltaState.processingQueue = false;
-        deltaState.expectedBackspaces = 0;
-        deltaState.seenBackspaces = 0;
-        deltaState.queuedKeys.clear();
-        deltaState.commitTimer.reset();
-        deltaState.ackTimeoutTimer.reset();
-        deltaState.pendingConvertedText.clear();
-        deltaState.pendingShownTextAfterCommit.clear();
-        if (clearSnapshot) {
-            clearBackspaceSnapshot(deltaState);
-        }
-    }
-
-    void scheduleFinishPendingBackspaceCommit(fcitx::InputContext *ic,
-                                          OpenKeyState &state,
-                                          uint64_t commitDelayUsec) {
-        auto &deltaState = state.delta;
-
-        if (!deps_.instance || commitDelayUsec == 0) {
-            finishPendingBackspaceCommit(ic, state);
-            return;
-        }
-
-        const auto icRef = ic->watch();
-        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
-        auto *loop = &deps_.instance->eventLoop();
-
-        deltaState.ackTimeoutTimer.reset();
-
-        const uint64_t deadline =
-            fcitx::now(CLOCK_MONOTONIC) + commitDelayUsec;
-
-        deltaState.ackTimeoutTimer = loop->addTimeEvent(
-            CLOCK_MONOTONIC, deadline, 0,
-            [this, icRef, lifetimeWeak]
-            (fcitx::EventSourceTime *, uint64_t) {
-                if (lifetimeWeak.expired()) {
-                    return false;
-                }
-
-                auto *ic2 = icRef.get();
-                if (!ic2) {
-                    return false;
-                }
-
-                auto *st = stateFor(ic2);
-                if (!st) {
-                    return false;
-                }
-
-                auto _timer = std::move(st->delta.ackTimeoutTimer);
-
-                finishPendingBackspaceCommit(ic2, *st);
-                return false;
-            });
-
-        if (deltaState.ackTimeoutTimer) {
-            deltaState.ackTimeoutTimer->setOneShot();
-        } else {
-            finishPendingBackspaceCommit(ic, state);
-        }
-    }
-
-    void finishPendingBackspaceCommit(fcitx::InputContext *ic,
-                                      OpenKeyState &state) {
-        auto &deltaState = state.delta;
-        const std::string commitText = std::move(deltaState.pendingConvertedText);
-        const std::string shownAfter =
-            std::move(deltaState.pendingShownTextAfterCommit);
-        deltaState.commitTimer.reset();
-        deltaState.pendingConvertedText.clear();
-        deltaState.pendingShownTextAfterCommit.clear();
-
-        if (!commitText.empty()) {
-            const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-            if (debug) {
-                FCITX_INFO() << "openkey: bs-delta commit"
-                             << " program=" << state.program;
-            }
-            ic->commitString(commitText);
-        }
-        deltaState.shownText = shownAfter;
-        deltaState.allowTransientResetPreserve = !deltaState.shownText.empty();
-        deltaState.waitingBackspaceAck = false;
-        deltaState.expectedBackspaces = 0;
-        deltaState.seenBackspaces = 0;
-        deltaState.ackTimeoutTimer.reset();
-        if (deltaState.shownText.empty()) {
-            deltaState.rawAsciiBuffer.clear();
-            deltaState.hasRewrittenCurrentWord = false;
-        }
-
-        if (!commitText.empty() && schedulePostCommitPump(ic, state)) {
-            return;
-        }
-
-        finishPostCommitPump(ic, state);
-    }
-
-    bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
-        auto &deltaState = state.delta;
-        if (!deps_.instance || kDeltaPostCommitPumpDelayUsec == 0) {
-            return false;
-        }
-
-        const auto icRef = ic->watch();
-        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
-        auto *loop = &deps_.instance->eventLoop();
-        const uint64_t deadline =
-            fcitx::now(CLOCK_MONOTONIC) + kDeltaPostCommitPumpDelayUsec;
-
-        deltaState.commitTimer = loop->addTimeEvent(
-            CLOCK_MONOTONIC, deadline, 0,
-            [this, icRef, lifetimeWeak](fcitx::EventSourceTime *, uint64_t) {
-                if (lifetimeWeak.expired()) {
-                    return false;
-                }
-
-                auto *ic2 = icRef.get();
-                if (!ic2) {
-                    return false;
-                }
-
-                auto *st = stateFor(ic2);
-                if (!st) {
-                    return false;
-                }
-
-                auto _timer = std::move(st->delta.commitTimer);
-                finishPostCommitPump(ic2, *st);
-                return false;
-            });
-
-        if (!deltaState.commitTimer) {
-            return false;
-        }
-
-        deltaState.commitTimer->setOneShot();
-        return true;
-    }
-
-    void finishPostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
-        auto &deltaState = state.delta;
-        deltaState.commitTimer.reset();
-        deltaState.rewriteLock = false;
-        pumpQueue(ic, state, deps_.adapter,
-                  deps_.debugEnabled ? deps_.debugEnabled() : false);
-    }
-
-    void scheduleAckTimeout(fcitx::InputContext *ic, OpenKeyState &state,
-                            const DeltaRewriteTiming &timing, int deleteCount) {
-        auto *loop = deps_.instance ? &deps_.instance->eventLoop() : nullptr;
-        auto &deltaState = state.delta;
-        deltaState.ackTimeoutTimer.reset();
-        if (!loop) {
-            return;
-        }
-
-        const auto icRef = ic->watch();
-        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
-        // Calculate dynamic ACK timeout: (deleteCount - 1) × interKeyUsec + buffer
-        // Note: commitDelayUsec is applied separately AFTER receiving ACKs
-        const uint64_t injectTime = deleteCount > 1 ? (deleteCount - 1) * timing.interKeyUsec : 0;
-        const uint64_t buffer = 50000; // 50ms buffer for app to process backspaces
-        const uint64_t dynamicTimeout = injectTime + buffer;
-        const uint64_t deadline =
-            fcitx::now(CLOCK_MONOTONIC) + dynamicTimeout;
-        
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        if (debug) {
-            FCITX_INFO() << "openkey: bs-delta ack-timeout scheduled"
-                         << " program=" << state.program
-                         << " deletes=" << deleteCount
-                         << " injectTime=" << injectTime
-                         << " buffer=" << buffer
-                         << " timeout=" << dynamicTimeout;
-        }
-        
-        deltaState.ackTimeoutTimer = loop->addTimeEvent(
-            CLOCK_MONOTONIC, deadline, 0,
-            [this, icRef, lifetimeWeak](fcitx::EventSourceTime *, uint64_t) {
-                if (lifetimeWeak.expired()) {
-                    return false;
-                }
-                auto *ic2 = icRef.get();
-                if (!ic2) {
-                    return false;
-                }
-                auto *st = stateFor(ic2);
-                if (!st || !st->delta.waitingBackspaceAck) {
-                    return false;
-                }
-                auto _timer = std::move(st->delta.ackTimeoutTimer);
-                FCITX_INFO() << "openkey: bs-delta ack timeout"
-                             << " program=" << st->program
-                             << " seen=" << st->delta.seenBackspaces
-                             << " expected=" << st->delta.expectedBackspaces;
-                const DeltaRewriteTiming timing = deltaTimingFor(ic2, st->program);
-                scheduleFinishPendingBackspaceCommit(ic2, *st,
-                                                     timing.commitDelayUsec);
-                return false;
-            });
-        if (deltaState.ackTimeoutTimer) {
-            deltaState.ackTimeoutTimer->setOneShot();
-        }
-    }
-
-    bool applyWordDelta(fcitx::InputContext *ic, OpenKeyState &state,
-                        bool debug, const std::string &newWord, char asciiChar,
-                        const char *reason,
-                        bool compareWithRawAppend = true) {
-        auto &deltaState = state.delta;
-        if (!deps_.backspaceInjector) {
-            return false;
-        }
-        if (!fcitx::utf8::validate(deltaState.shownText) ||
-            !fcitx::utf8::validate(newWord)) {
-            clearWordState(deltaState);
-            return false;
-        }
-
-        const std::string oldShown = deltaState.shownText;
-        const std::string rawAppend =
-            compareWithRawAppend ? oldShown + asciiChar : oldShown;
-        const DeltaRewriteTiming timing = deltaTimingFor(ic, state.program);
-        const std::size_t prefixLen =
-            commonPrefixBytesUTF8Boundary(deltaState.shownText, newWord);
-        unsigned int deleteCount =
-            utf8CharCount(deltaState.shownText.substr(prefixLen));
-        std::string commitText = newWord.substr(prefixLen);
-        const bool browserAutocomplete =
-            deleteCount > 0 &&
-            isBrowserLikeProgram(state.program) &&
-            !deltaState.hasRewrittenCurrentWord &&
-            looksLikeBrowserAutocomplete(ic, deltaState.shownText);
-        if (browserAutocomplete) {
-            deleteCount += 1;
-        }
-        if (deleteCount > 128) {
-            deleteCount = utf8CharCount(deltaState.shownText);
-            commitText = newWord;
-        }
-
-        if (debug) {
-            FCITX_INFO() << "openkey: bs-delta program=" << state.program
-                         << " reason=" << reason
-                         << " from=" << deltaState.shownText
-                         << " to=" << newWord
-                         << " delete=" << deleteCount
-                         << " commit=" << commitText
-                         << " inter=" << timing.interKeyUsec
-                         << " commitDelay=" << timing.commitDelayUsec
-                         << " autocomplete=" << browserAutocomplete
-                         << " queued=" << deltaState.queuedKeys.size();
-        }
-
-        if (deleteCount == 0) {
-            if (!commitText.empty()) {
-                ic->commitString(commitText);
-            }
-            deltaState.shownText = newWord;
-            deltaState.hasRewrittenCurrentWord =
-                deltaState.hasRewrittenCurrentWord || (newWord != rawAppend);
-            deltaState.restoredFromBackspaceSnapshot = false;
-            deltaState.allowBackspaceSnapshotResetPreserve = false;
-            deltaState.allowTransientResetPreserve = true;
-            return true;
-        }
-
-        const std::string programForInjector = state.program;
-        const auto method = deps_.backspaceInjector->sendBackspaces(
-            ic, programForInjector, static_cast<int>(deleteCount), debug,
-            timing.interKeyUsec);
-
-        if (method == BackspaceInjector::Method::Uinput) {
-            // One extra backspace acts as a sentinel: app receives the first N,
-            // OpenKey consumes the last one and commits when it arrives.
-            deps_.backspaceInjector->sendBackspaces(
-                ic, programForInjector, 1, debug, timing.interKeyUsec);
-            deltaState.rewriteLock = true;
-            deltaState.waitingBackspaceAck = true;
-            deltaState.expectedBackspaces = static_cast<int>(deleteCount) + 1;
-            deltaState.seenBackspaces = 0;
-            deltaState.pendingConvertedText = std::move(commitText);
-            deltaState.pendingShownTextAfterCommit = newWord;
-            deltaState.hasRewrittenCurrentWord =
-                deltaState.hasRewrittenCurrentWord || (newWord != rawAppend);
-            deltaState.restoredFromBackspaceSnapshot = false;
-            deltaState.allowBackspaceSnapshotResetPreserve = false;
-            deltaState.allowTransientResetPreserve = true;
-            scheduleAckTimeout(ic, state, timing, static_cast<int>(deleteCount));
-            return true;
-        }
-
-        clearWordState(deltaState);
-        return false;
-    }
-
-    bool maybeExpandMacroBeforeBoundary(fcitx::InputContext *ic,
-                                        OpenKeyState &state,
-                                        const fcitx::Key &boundaryKey,
-                                        std::shared_ptr<OpenKeyAdapter> adapterShared,
-                                        bool debug, char trigger) {
-        auto &deltaState = state.delta;
-        if (!deps_.enableMacro || !deps_.enableMacro() || !adapterShared ||
-            !isMacroTriggerKey(trigger) || deltaState.shownText.empty()) {
-            return false;
-        }
-
-        adapterShared->setCodeTable(state.codeTable);
-        std::string replacement;
-        if (!adapterShared->expandMacro(deltaState.shownText, replacement)) {
-            return false;
-        }
-
-        if (!applyWordDelta(ic, state, debug, replacement, trigger, "macro",
-                            false)) {
-            return false;
-        }
-
-        if (deltaState.hasPendingRewrite()) {
-            deltaState.queuedKeys.push_front(boundaryKey);
-        } else {
-            rememberBackspaceSnapshot(deltaState);
-            forwardKeyPressAndRelease(ic, boundaryKey);
-            clearWordState(deltaState, false);
-            deltaState.allowBackspaceSnapshotResetPreserve =
-                needsTransientResetPreserve(state.program) && trigger == ' ';
-        }
-        return true;
-    }
-
-    bool maybeRestoreBeforeBoundary(fcitx::InputContext *ic,
-                                    OpenKeyState &state,
-                                    const fcitx::Key &boundaryKey,
-                                    std::shared_ptr<OpenKeyAdapter> adapterShared,
-                                    bool debug, char trigger) {
-        auto &deltaState = state.delta;
-        if (!deps_.restoreIfWrongSpelling ||
-            !deps_.restoreIfWrongSpelling() || !adapterShared ||
-            deltaState.shownText.empty()) {
-            return false;
-        }
-
-        adapterShared->setCodeTable(state.codeTable);
-        std::string restoredWord;
-        const bool restored =
-            !deltaState.rawAsciiBuffer.empty()
-                ? adapterShared->restoreFromRawAsciiOnWordBreak(
-                      deltaState.shownText, deltaState.rawAsciiBuffer, trigger,
-                      restoredWord)
-                : adapterShared->restoreOnWordBreak(deltaState.shownText, trigger,
-                                                   restoredWord);
-        if (!restored) {
-            return false;
-        }
-
-        if (!applyWordDelta(ic, state, debug, restoredWord, trigger,
-                            "restore-boundary", false)) {
-            return false;
-        }
-
-        if (deltaState.hasPendingRewrite()) {
-            deltaState.queuedKeys.push_front(boundaryKey);
-        } else {
-            rememberBackspaceSnapshot(deltaState);
-            forwardKeyPressAndRelease(ic, boundaryKey);
-            clearWordState(deltaState, false);
-            deltaState.allowBackspaceSnapshotResetPreserve =
-                needsTransientResetPreserve(state.program) && trigger == ' ';
-        }
-        return true;
-    }
-
-    bool processQueuedKey(fcitx::InputContext *ic, OpenKeyState &state,
-                          const fcitx::Key &key,
-                          std::shared_ptr<OpenKeyAdapter> adapterShared,
-                          bool debug) {
-        auto &deltaState = state.delta;
-
-        if (key.isCursorMove() || key.check(FcitxKey_Delete)) {
-            clearWordState(deltaState);
-            return false;
-        }
-
-        if (key.check(FcitxKey_Escape)) {
-            clearWordState(deltaState);
-            return false;
-        }
-
-        if (key.check(FcitxKey_BackSpace)) {
-            if (needsTransientResetPreserve(state.program) &&
-                !deltaState.shownText.empty() &&
-                !trackedWordStillBeforeCursor(ic, deltaState.shownText, false)) {
-                clearWordState(deltaState);
-                return false;
-            }
-            if (!restoreBackspaceSnapshot(deltaState)) {
-                clearWordState(deltaState);
-            }
-            return false; // let app handle physical Backspace
-        }
-
-        const auto normalizedKey = key.normalize();
-        const uint32_t uni = fcitx::Key::keySymToUnicode(normalizedKey.sym());
-        if (uni >= 0x20 && uni <= 0x7E) {
-            const char c = static_cast<char>(uni);
-
-            // Word boundaries: clear composition state, forward to app
-            if (isBoundaryASCII(c) || key.check(FcitxKey_Return) ||
-                key.check(FcitxKey_KP_Enter) || key.check(FcitxKey_ISO_Enter) ||
-                key.check(FcitxKey_Tab)) {
-                if (maybeExpandMacroBeforeBoundary(ic, state, key, adapterShared,
-                                                   debug, c)) {
-                    return true;
-                }
-                if (maybeRestoreBeforeBoundary(ic, state, key, adapterShared,
-                                               debug, c)) {
-                    return true;
-                }
-                rememberBackspaceSnapshot(deltaState);
-                clearWordState(deltaState, false);
-                deltaState.allowBackspaceSnapshotResetPreserve =
-                    needsTransientResetPreserve(state.program) && c == ' ';
-                return false;
-            }
-
-            // Only composing chars go to the engine.
-            // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
-            if (!isComposingASCII(c)) {
-                clearWordState(deltaState);
-                return false;
-            }
-
-            if (deltaState.shownText.empty() &&
-                deltaState.canReseedFromBackspaceSnapshot) {
-                clearBackspaceSnapshot(deltaState);
-            }
-
-            if (needsTransientResetPreserve(state.program) &&
-                !deltaState.shownText.empty() &&
-                !trackedWordStillBeforeCursor(ic, deltaState.shownText, false)) {
-                clearWordState(deltaState);
-                return false;
-            }
-
-            if (!adapterShared) {
-                clearWordState(deltaState);
-                return false;
-            }
-            adapterShared->setCodeTable(state.codeTable);
-            const auto r =
-                adapterShared->processAsciiKey(deltaState.shownText, c);
-            if (!r.handled) {
-                clearWordState(deltaState);
-                return false;
-            }
-            deltaState.rawAsciiBuffer.push_back(c);
-            return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
-        }
-
-        clearWordState(deltaState);
-        return false;
-    }
-
-    void pumpQueue(fcitx::InputContext *ic, OpenKeyState &state,
-                   std::shared_ptr<OpenKeyAdapter> adapterShared, bool debug) {
-        auto &deltaState = state.delta;
-        if (deltaState.processingQueue || deltaState.rewriteLock) {
-            return;
-        }
-        deltaState.processingQueue = true;
-        while (!deltaState.rewriteLock && !deltaState.queuedKeys.empty()) {
-            const fcitx::Key key = deltaState.queuedKeys.front();
-            deltaState.queuedKeys.pop_front();
-            const bool handled =
-                processQueuedKey(ic, state, key, adapterShared, debug);
-            if (!handled) {
-                forwardKeyPressAndRelease(ic, key);
-            }
-        }
-        deltaState.processingQueue = false;
-    }
-
-    DeltaModeDeps deps_;
-};
-
-class NonPreeditBackspaceRewriteModeHandler final : public InputModeHandler {
-public:
-    explicit NonPreeditBackspaceRewriteModeHandler(DeltaModeDeps deps)
-        : deps_(std::move(deps)) {}
-
-    bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
-               OpenKeyState &state) override {
-        auto key = event.rawKey();
-        auto normKey = event.key().normalize();
-
-        auto isBackspace = [&]() {
-            return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
-        };
-
-        if (event.isRelease()) {
-            return false;
-        }
-
-        if (hasCtrlAltSuperMeta(key)) {
-            return false;
-        }
-
-        const auto adapterShared = deps_.adapter;
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        auto &nonPreeditState = state.nonPreeditDelta;
-
-        state.delta.clear();
-
-        if (nonPreeditState.rewriteLock) {
-            if (isBackspace()) {
-                return false;
-            }
-
-            nonPreeditState.nonPreeditKeys.push_back(key);
-            event.filterAndAccept();
-            return true;
-        }
-
-        if (isBackspace()) {
-            if (needsTransientResetPreserve(state.program) &&
-                !nonPreeditState.shownText.empty() &&
-                !trackedWordStillBeforeCursor(ic, nonPreeditState.shownText,
-                                              false)) {
-                clearComposeState(nonPreeditState, "backspace-cursor-mismatch");
-                return false;
-            }
-            if (restoreBackspaceSnapshot(nonPreeditState)) {
-                return true;
-            }
-            // Không clear hết — chỉ drop ký tự cuối để giữ context
-            if (!nonPreeditState.shownText.empty()) {
-                nonPreeditState.shownText = utf8DropLastN(nonPreeditState.shownText, 1);
-                if (!nonPreeditState.rawAsciiBuffer.empty()) {
-                    nonPreeditState.rawAsciiBuffer.pop_back();
-                }
-                if (nonPreeditState.shownText.empty()) {
-                    nonPreeditState.rawAsciiBuffer.clear();
-                    nonPreeditState.hasRewrittenCurrentWord = false;
-                }
-                nonPreeditState.allowTransientResetPreserve =
-                    !nonPreeditState.shownText.empty();
-            }
-            return false; // để app tự xóa ký tự trên màn hình
-        }
-
-        if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
-            normKey.check(FcitxKey_Shift_L) || normKey.check(FcitxKey_Shift_R)) {
-            return false;
-        }
-
-        const uint32_t uni = fcitx::Key::keySymToUnicode(normKey.sym());
-
-        if (!(uni >= 0x20 && uni <= 0x7E)) {
-            clearComposeState(nonPreeditState, "non-printable-boundary");
-            return false;
-        }
-
-        if (uni >= 0x20 && uni <= 0x7E) {
-            const char c = static_cast<char>(uni);
-            if (!isComposingASCII(c)) {
-                const bool handled =
-                    processNonPreeditKey(ic, state, key, adapterShared, debug);
-                if (handled) {
-                    event.filterAndAccept();
-                }
-                return handled;
-            }
-
-            nonPreeditState.nonPreeditKeys.push_back(key);
-            event.filterAndAccept();
-            pumpNonPreedit(ic, state, adapterShared, debug);
-            return true;
-        }
-
-        if (key.isCursorMove() || normKey.isCursorMove() ||
-            key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
-            key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-            clearComposeState(nonPreeditState, "cursor-delete");
-        }
-
-        return false;
-    }
-
-    void handleRemoteBackspaceAction(fcitx::InputContext *ic,
-                                     OpenKeyState &state) {
-        if (!deps_.backspaceInjector) {
-            return;
-        }
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        deps_.backspaceInjector->sendBackspaces(
-            ic, state.program, 1, debug, 0);
-    }
-
-    void handleRemoteCommitAction(fcitx::InputContext *ic, OpenKeyState &state,
-                                  uint64_t txId) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        if (nonPreeditState.remotePendingTxId != txId) {
-            return;
-        }
-        finishPendingBackspaceCommit(ic, state);
-    }
-
-private:
-    OpenKeyState *stateFor(fcitx::InputContext *ic) const {
-        if (!ic || !deps_.factory) {
-            return nullptr;
-        }
-        return ic->propertyFor(deps_.factory);
-    }
-
-    bool backspaceSnapshotEnabled() const {
-        return !deps_.enableBackspaceSnapshot ||
-               deps_.enableBackspaceSnapshot();
-    }
-
-    void clearBackspaceSnapshot(
-        NonPreeditDeltaRewriteState &nonPreeditState) const {
-        const bool hadSnapshot =
-            nonPreeditState.canReseedFromBackspaceSnapshot ||
-            !nonPreeditState.backspaceSnapshotShownText.empty() ||
-            !nonPreeditState.backspaceSnapshotRawAsciiBuffer.empty() ||
-            nonPreeditState.preserveBackspaceSnapshotAfterBoundaryBackspace;
-        if (hadSnapshot && deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-snapshot clear"
-                         << " mode=nonPreedit"
-                         << " shown=" << nonPreeditState.shownText
-                         << " snapshotShown="
-                         << nonPreeditState.backspaceSnapshotShownText
-                         << " snapshotRaw="
-                         << nonPreeditState.backspaceSnapshotRawAsciiBuffer
-                         << " canReseed="
-                         << nonPreeditState.canReseedFromBackspaceSnapshot
-                         << " preserveAfterBoundaryBackspace="
-                         << nonPreeditState.preserveBackspaceSnapshotAfterBoundaryBackspace;
-        }
-        nonPreeditState.backspaceSnapshotShownText.clear();
-        nonPreeditState.backspaceSnapshotRawAsciiBuffer.clear();
-        nonPreeditState.backspaceSnapshotHasRewrittenCurrentWord = false;
-        nonPreeditState.canReseedFromBackspaceSnapshot = false;
-        nonPreeditState.preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-        nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
-    }
-
-    void rememberBackspaceSnapshot(
-        NonPreeditDeltaRewriteState &nonPreeditState) const {
-        if (!backspaceSnapshotEnabled()) {
-            clearBackspaceSnapshot(nonPreeditState);
-            return;
-        }
-        if (nonPreeditState.shownText.empty()) {
-            if (nonPreeditState.canReseedFromBackspaceSnapshot &&
-                !nonPreeditState.backspaceSnapshotShownText.empty()) {
-                nonPreeditState.preserveBackspaceSnapshotAfterBoundaryBackspace =
-                    true;
-                if (deps_.debugEnabled && deps_.debugEnabled()) {
-                    FCITX_INFO() << "openkey: bs-snapshot remember-boundary"
-                                 << " mode=nonPreedit"
-                                 << " snapshotShown="
-                                 << nonPreeditState.backspaceSnapshotShownText
-                                 << " snapshotRaw="
-                                 << nonPreeditState.backspaceSnapshotRawAsciiBuffer;
-                }
-                return;
-            }
-            if (deps_.debugEnabled && deps_.debugEnabled()) {
-                FCITX_INFO() << "openkey: bs-snapshot remember-skip"
-                             << " mode=nonPreedit"
-                             << " reason=empty-shown"
-                             << " snapshotShown="
-                             << nonPreeditState.backspaceSnapshotShownText
-                             << " canReseed="
-                             << nonPreeditState.canReseedFromBackspaceSnapshot;
-            }
-            clearBackspaceSnapshot(nonPreeditState);
-            return;
-        }
-        nonPreeditState.backspaceSnapshotShownText = nonPreeditState.shownText;
-        nonPreeditState.backspaceSnapshotRawAsciiBuffer =
-            nonPreeditState.rawAsciiBuffer;
-        nonPreeditState.backspaceSnapshotHasRewrittenCurrentWord =
-        nonPreeditState.hasRewrittenCurrentWord;
-        nonPreeditState.canReseedFromBackspaceSnapshot = true;
-        nonPreeditState.preserveBackspaceSnapshotAfterBoundaryBackspace = true;
-        if (deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-snapshot remember"
-                         << " mode=nonPreedit"
-                         << " shown=" << nonPreeditState.shownText
-                         << " raw=" << nonPreeditState.rawAsciiBuffer
-                         << " rewritten="
-                         << nonPreeditState.hasRewrittenCurrentWord;
-        }
-    }
-
-    bool restoreBackspaceSnapshot(
-        NonPreeditDeltaRewriteState &nonPreeditState) const {
-        if (!backspaceSnapshotEnabled()) {
-            clearBackspaceSnapshot(nonPreeditState);
-            return false;
-        }
-        if (!nonPreeditState.canReseedFromBackspaceSnapshot ||
-            !nonPreeditState.shownText.empty() ||
-            nonPreeditState.backspaceSnapshotShownText.empty()) {
-            if (deps_.debugEnabled && deps_.debugEnabled()) {
-                FCITX_INFO() << "openkey: bs-snapshot restore-miss"
-                             << " mode=nonPreedit"
-                             << " shown=" << nonPreeditState.shownText
-                             << " snapshotShown="
-                             << nonPreeditState.backspaceSnapshotShownText
-                             << " snapshotRaw="
-                             << nonPreeditState.backspaceSnapshotRawAsciiBuffer
-                             << " canReseed="
-                             << nonPreeditState.canReseedFromBackspaceSnapshot;
-            }
-            return false;
-        }
-        nonPreeditState.shownText =
-            nonPreeditState.backspaceSnapshotShownText;
-        nonPreeditState.rawAsciiBuffer =
-            nonPreeditState.backspaceSnapshotRawAsciiBuffer;
-        nonPreeditState.hasRewrittenCurrentWord =
-            nonPreeditState.backspaceSnapshotHasRewrittenCurrentWord;
-        nonPreeditState.restoredFromBackspaceSnapshot = true;
-        nonPreeditState.allowBackspaceSnapshotResetPreserve = true;
-        if (deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: bs-snapshot restore"
-                         << " mode=nonPreedit"
-                         << " shown=" << nonPreeditState.shownText
-                         << " raw=" << nonPreeditState.rawAsciiBuffer
-                         << " rewritten="
-                         << nonPreeditState.hasRewrittenCurrentWord;
-        }
-        clearBackspaceSnapshot(nonPreeditState);
-        nonPreeditState.allowBackspaceSnapshotResetPreserve = true;
-        return true;
-    }
-
-    void clearComposeState(NonPreeditDeltaRewriteState &nonPreeditState,
-                           const char *reason = "unknown",
-                           bool clearSnapshot = true) const {
-        
-        if (deps_.debugEnabled && deps_.debugEnabled()) {
-            FCITX_INFO() << "openkey: nonPreedit clear"
-                        << " reason=" << reason
-                        << " shown=" << nonPreeditState.shownText
-                        << " pending=" << nonPreeditState.nonPreeditKeys.size()
-                        << " rewriteLock=" << nonPreeditState.rewriteLock
-                        << " waitingAck=" << nonPreeditState.waitingBackspaceAck
-                        << " remotePending=" << nonPreeditState.remoteRewritePending;
-        }
-        nonPreeditState.shownText.clear();
-        nonPreeditState.rawAsciiBuffer.clear();
-        nonPreeditState.hasRewrittenCurrentWord = false;
-        nonPreeditState.restoredFromBackspaceSnapshot = false;
-        nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
-        nonPreeditState.allowTransientResetPreserve = false;
-        nonPreeditState.rewriteLock = false;
-        nonPreeditState.waitingBackspaceAck = false;
-        nonPreeditState.processingNonPreedit = false;
-        nonPreeditState.expectedBackspaces = 0;
-        nonPreeditState.seenBackspaces = 0;
-        nonPreeditState.lateBackspaceBudget = 0;
-        nonPreeditState.nonPreeditKeys.clear();
-        nonPreeditState.commitTimer.reset();
-        nonPreeditState.lateBackspaceTimeoutTimer.reset();
-        nonPreeditState.ackTimeoutTimer.reset();
-        nonPreeditState.pendingConvertedText.clear();
-        nonPreeditState.pendingShownTextAfterCommit.clear();
-        nonPreeditState.remotePendingTxId = 0;
-        nonPreeditState.remoteRewritePending = false;
-        if (clearSnapshot) {
-            clearBackspaceSnapshot(nonPreeditState);
-        }
-    }
-
-    void finishPendingBackspaceCommit(fcitx::InputContext *ic,
-                                      OpenKeyState &state) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        const std::string commitText = std::move(nonPreeditState.pendingConvertedText);
-        const std::string shownAfter =
-            std::move(nonPreeditState.pendingShownTextAfterCommit);
-        nonPreeditState.commitTimer.reset();
-        nonPreeditState.pendingConvertedText.clear();
-        nonPreeditState.pendingShownTextAfterCommit.clear();
-
-        if (!commitText.empty()) {
-            ic->commitString(commitText);
-        }
-        nonPreeditState.shownText = shownAfter;
-        nonPreeditState.allowTransientResetPreserve =
-            !nonPreeditState.shownText.empty();
-        nonPreeditState.waitingBackspaceAck = false;
-        nonPreeditState.expectedBackspaces = 0;
-        nonPreeditState.seenBackspaces = 0;
-        nonPreeditState.ackTimeoutTimer.reset();
-        nonPreeditState.remotePendingTxId = 0;
-        nonPreeditState.remoteRewritePending = false;
-        if (nonPreeditState.shownText.empty()) {
-            nonPreeditState.rawAsciiBuffer.clear();
-            nonPreeditState.hasRewrittenCurrentWord = false;
-        }
-
-        if (!commitText.empty() && schedulePostCommitPump(ic, state)) {
-            return;
-        }
-
-        finishPostCommitPump(ic, state);
-    }
-
-    bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        if (!deps_.instance || kNonPreeditPostCommitPumpDelayUsec == 0) {
-            return false;
-        }
-
-        const auto icRef = ic->watch();
-        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
-        auto *loop = &deps_.instance->eventLoop();
-        const uint64_t deadline =
-            fcitx::now(CLOCK_MONOTONIC) + kNonPreeditPostCommitPumpDelayUsec;
-
-        nonPreeditState.commitTimer = loop->addTimeEvent(
-            CLOCK_MONOTONIC, deadline, 0,
-            [this, icRef, lifetimeWeak](fcitx::EventSourceTime *, uint64_t) {
-                if (lifetimeWeak.expired()) {
-                    return false;
-                }
-
-                auto *ic2 = icRef.get();
-                if (!ic2) {
-                    return false;
-                }
-
-                auto *st = stateFor(ic2);
-                if (!st) {
-                    return false;
-                }
-
-                auto _timer = std::move(st->nonPreeditDelta.commitTimer);
-                finishPostCommitPump(ic2, *st);
-                return false;
-            });
-
-        if (!nonPreeditState.commitTimer) {
-            return false;
-        }
-
-        nonPreeditState.commitTimer->setOneShot();
-        return true;
-    }
-
-    void finishPostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        nonPreeditState.commitTimer.reset();
-        nonPreeditState.rewriteLock = false;
-        pumpNonPreedit(ic, state, deps_.adapter,
-                  deps_.debugEnabled ? deps_.debugEnabled() : false);
-    }
-
-    bool applyWordDelta(fcitx::InputContext *ic, OpenKeyState &state,
-                        bool debug, const std::string &newWord, char asciiChar,
-                        const char *reason,
-                        bool compareWithRawAppend = true) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        if (!deps_.backspaceInjector) {
-            return false;
-        }
-        if (!fcitx::utf8::validate(nonPreeditState.shownText) ||
-            !fcitx::utf8::validate(newWord)) {
-            clearComposeState(nonPreeditState, "invalid-utf8");
-            return false;
-        }
-
-        const std::string oldShown = nonPreeditState.shownText;
-        const std::string rawAppend =
-            compareWithRawAppend ? oldShown + asciiChar : oldShown;
-        const RewriteTiming timing = nonPreeditTimingFor(ic, state.program);
-        const std::size_t prefixLen =
-            commonPrefixBytesUTF8Boundary(nonPreeditState.shownText, newWord);
-        unsigned int deleteCount =
-            utf8CharCount(nonPreeditState.shownText.substr(prefixLen));
-        std::string commitText = newWord.substr(prefixLen);
-        const bool browserAutocomplete =
-            deleteCount > 0 &&
-            isBrowserLikeProgram(state.program) &&
-            !nonPreeditState.hasRewrittenCurrentWord &&
-            looksLikeBrowserAutocomplete(ic, nonPreeditState.shownText);
-        if (browserAutocomplete) {
-            deleteCount += 1;
-        }
-        if (deleteCount > 128) {
-            deleteCount = utf8CharCount(nonPreeditState.shownText);
-            commitText = newWord;
-        }
-
-        if (debug) {
-            FCITX_INFO() << "openkey: nonPreedit program=" << state.program
-                         << " reason=" << reason
-                         << " from=" << nonPreeditState.shownText
-                         << " to=" << newWord
-                         << " delete=" << deleteCount
-                         << " commit=" << commitText
-                         << " inter=" << timing.interKeyUsec
-                         << " delay=" << timing.commitDelayUsec
-                         << " autocomplete=" << browserAutocomplete
-                         << " nonPreeditPending=" << nonPreeditState.nonPreeditKeys.size();
-        }
-
-        if (deleteCount == 0) {
-            if (!commitText.empty()) {
-                ic->commitString(commitText);
-            }
-            nonPreeditState.shownText = newWord;
-            nonPreeditState.hasRewrittenCurrentWord =
-                nonPreeditState.hasRewrittenCurrentWord || (newWord != rawAppend);
-            nonPreeditState.restoredFromBackspaceSnapshot = false;
-            nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
-            nonPreeditState.allowTransientResetPreserve = true;
-            return true;
-        }
-
-        if (deps_.nonPreeditRemoteEnabled && deps_.nonPreeditRemoteEnabled() &&
-            deps_.nonPreeditRemoteSchedule) {
-            nonPreeditState.rewriteLock = true;
-            nonPreeditState.waitingBackspaceAck = false;
-            nonPreeditState.expectedBackspaces = static_cast<int>(deleteCount);
-            nonPreeditState.seenBackspaces = 0;
-            nonPreeditState.pendingConvertedText = commitText;
-            nonPreeditState.pendingShownTextAfterCommit = newWord;
-            nonPreeditState.hasRewrittenCurrentWord =
-                nonPreeditState.hasRewrittenCurrentWord || (newWord != rawAppend);
-            nonPreeditState.restoredFromBackspaceSnapshot = false;
-            nonPreeditState.allowBackspaceSnapshotResetPreserve = false;
-            nonPreeditState.allowTransientResetPreserve = true;
-            if (deps_.nonPreeditRemoteSchedule(
-                    ic, state, deleteCount, timing.interKeyUsec,
-                    timing.commitDelayUsec)) {
-                nonPreeditState.remoteRewritePending = true;
-                return true;
-            }
-            nonPreeditState.rewriteLock = false;
-            nonPreeditState.pendingConvertedText.clear();
-            nonPreeditState.pendingShownTextAfterCommit.clear();
-        }
-
-        clearComposeState(nonPreeditState, "default");
-        return false;
-    }
-
-    bool hasPendingRewrite(const NonPreeditDeltaRewriteState &state) const {
-        return state.rewriteLock || state.waitingBackspaceAck ||
-               !state.pendingConvertedText.empty() ||
-               !state.pendingShownTextAfterCommit.empty() ||
-               state.hasRemoteRewritePending();
-    }
-
-    bool maybeExpandMacroBeforeBoundary(fcitx::InputContext *ic,
-                                        OpenKeyState &state,
-                                        const fcitx::Key &boundaryKey,
-                                        std::shared_ptr<OpenKeyAdapter> adapterShared,
-                                        bool debug, char trigger) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        if (!deps_.enableMacro || !deps_.enableMacro() || !adapterShared ||
-            !isMacroTriggerKey(trigger) || nonPreeditState.shownText.empty()) {
-            return false;
-        }
-
-        adapterShared->setCodeTable(state.codeTable);
-        std::string replacement;
-        if (!adapterShared->expandMacro(nonPreeditState.shownText, replacement)) {
-            return false;
-        }
-
-        if (!applyWordDelta(ic, state, debug, replacement, trigger, "macro",
-                            false)) {
-            return false;
-        }
-
-        if (hasPendingRewrite(nonPreeditState)) {
-            nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
-        } else {
-            rememberBackspaceSnapshot(nonPreeditState);
-            forwardKeyPressAndRelease(ic, boundaryKey);
-            clearComposeState(nonPreeditState, "macro-boundary", false);
-            nonPreeditState.allowBackspaceSnapshotResetPreserve =
-                needsTransientResetPreserve(state.program) && trigger == ' ';
-        }
-        return true;
-    }
-
-    bool maybeRestoreBeforeBoundary(fcitx::InputContext *ic,
-                                    OpenKeyState &state,
-                                    const fcitx::Key &boundaryKey,
-                                    std::shared_ptr<OpenKeyAdapter> adapterShared,
-                                    bool debug, char trigger) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        if (!deps_.restoreIfWrongSpelling ||
-            !deps_.restoreIfWrongSpelling() || !adapterShared ||
-            nonPreeditState.shownText.empty()) {
-            return false;
-        }
-
-        adapterShared->setCodeTable(state.codeTable);
-        std::string restoredWord;
-        const bool restored =
-            !nonPreeditState.rawAsciiBuffer.empty()
-                ? adapterShared->restoreFromRawAsciiOnWordBreak(
-                      nonPreeditState.shownText,
-                      nonPreeditState.rawAsciiBuffer, trigger, restoredWord)
-                : adapterShared->restoreOnWordBreak(nonPreeditState.shownText,
-                                                   trigger, restoredWord);
-        if (!restored) {
-            return false;
-        }
-
-        if (!applyWordDelta(ic, state, debug, restoredWord, trigger,
-                            "restore-boundary", false)) {
-            return false;
-        }
-
-        if (hasPendingRewrite(nonPreeditState)) {
-            nonPreeditState.nonPreeditKeys.push_front(boundaryKey);
-        } else {
-            rememberBackspaceSnapshot(nonPreeditState);
-            forwardKeyPressAndRelease(ic, boundaryKey);
-            clearComposeState(nonPreeditState, "restore-boundary", false);
-            nonPreeditState.allowBackspaceSnapshotResetPreserve =
-                needsTransientResetPreserve(state.program) && trigger == ' ';
-        }
-        return true;
-    }
-
-    bool processNonPreeditKey(fcitx::InputContext *ic, OpenKeyState &state,
-                          const fcitx::Key &nonPreeditKey,
-                          std::shared_ptr<OpenKeyAdapter> adapterShared,
-                          bool debug) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        const RewriteTiming timing = nonPreeditTimingFor(ic, state.program);
-        if (hasCtrlAltSuperMeta(nonPreeditKey)) {
-           clearComposeState(nonPreeditState, "ctrl-alt-super");
-            return false;
-        }
-
-        if (nonPreeditKey.isCursorMove() || nonPreeditKey.check(FcitxKey_Delete)) {
-           clearComposeState(nonPreeditState, "cursor-delete");
-            return false;
-        }
-
-        if (nonPreeditKey.check(FcitxKey_Escape)) {
-           clearComposeState(nonPreeditState, "escape");
-            return false;
-        }
-
-        if (nonPreeditKey.check(FcitxKey_BackSpace)) {
-            if (needsTransientResetPreserve(state.program) &&
-                !nonPreeditState.shownText.empty() &&
-                !trackedWordStillBeforeCursor(ic, nonPreeditState.shownText,
-                                              false)) {
-                clearComposeState(nonPreeditState, "backspace-cursor-mismatch");
-                return false;
-            }
-            if (restoreBackspaceSnapshot(nonPreeditState)) {
-                return false;
-            }
-            if (nonPreeditState.shownText.empty()) {
-                return false;
-            }
-            if (!nonPreeditState.hasRewrittenCurrentWord) {
-                clearComposeState(nonPreeditState, "backspace-empty-or-not-rewritten");           
-                return false;
-            }
-            const auto method = deps_.backspaceInjector->sendBackspaces(
-                ic, state.program, 1, debug, timing.interKeyUsec);
-            if (method != BackspaceInjector::Method::Uinput) {
-                return false;
-            }
-            if (!nonPreeditState.rawAsciiBuffer.empty()) {
-                nonPreeditState.rawAsciiBuffer.pop_back();
-            }
-            nonPreeditState.shownText = utf8DropLastN(nonPreeditState.shownText, 1);
-            if (nonPreeditState.shownText.empty()) {
-                nonPreeditState.rawAsciiBuffer.clear();
-                nonPreeditState.hasRewrittenCurrentWord = false;
-            }
-            nonPreeditState.allowTransientResetPreserve =
-                !nonPreeditState.shownText.empty();
-            return true;
-        }
-
-        const auto normalizedKey = nonPreeditKey.normalize();
-        const uint32_t uni = fcitx::Key::keySymToUnicode(normalizedKey.sym());
-        if (uni >= 0x20 && uni <= 0x7E) {
-            const char c = static_cast<char>(uni);
-
-            // Word boundaries: clear composition state, forward to app
-            if (isBoundaryASCII(c) || nonPreeditKey.check(FcitxKey_Return) ||
-                nonPreeditKey.check(FcitxKey_KP_Enter) ||
-                nonPreeditKey.check(FcitxKey_ISO_Enter) ||
-                nonPreeditKey.check(FcitxKey_Tab)) {
-                if (maybeExpandMacroBeforeBoundary(ic, state, nonPreeditKey,
-                                                   adapterShared, debug, c)) {
-                    return true;
-                }
-                if (maybeRestoreBeforeBoundary(ic, state, nonPreeditKey,
-                                               adapterShared, debug, c)) {
-                    return true;
-                }
-                rememberBackspaceSnapshot(nonPreeditState);
-                clearComposeState(nonPreeditState, "boundary", false);
-                nonPreeditState.allowBackspaceSnapshotResetPreserve =
-                    needsTransientResetPreserve(state.program) && c == ' ';
-                return false;
-            }
-
-            // Only composing chars go to the engine.
-            // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
-            if (!isComposingASCII(c)) {
-                clearComposeState(nonPreeditState, "not-composing-ascii");
-                return false;
-            }
-
-            if (nonPreeditState.shownText.empty() &&
-                nonPreeditState.canReseedFromBackspaceSnapshot) {
-                clearBackspaceSnapshot(nonPreeditState);
-            }
-
-            if (needsTransientResetPreserve(state.program) &&
-                !nonPreeditState.shownText.empty() &&
-                !trackedWordStillBeforeCursor(ic, nonPreeditState.shownText,
-                                              false)) {
-                clearComposeState(nonPreeditState, "ascii-cursor-mismatch");
-                return false;
-            }
-
-            if (!adapterShared) {
-                clearComposeState(nonPreeditState, "no-adapter");
-                return false;
-            }
-            adapterShared->setCodeTable(state.codeTable);
-            const auto r =
-                adapterShared->processAsciiKey(nonPreeditState.shownText, c);
-            if (!r.handled) {
-                clearComposeState(nonPreeditState, "adapter-not-handled");
-                return false;
-            }
-            nonPreeditState.rawAsciiBuffer.push_back(c);
-            return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
-        }
-
-       clearComposeState(nonPreeditState, "non-ascii-key");
-        return false;
-    }
-
-    void pumpNonPreedit(fcitx::InputContext *ic, OpenKeyState &state,
-                   std::shared_ptr<OpenKeyAdapter> adapterShared, bool debug) {
-        auto &nonPreeditState = state.nonPreeditDelta;
-        if (nonPreeditState.processingNonPreedit || nonPreeditState.rewriteLock) {
-            return;
-        }
-        nonPreeditState.processingNonPreedit = true;
-        while (!nonPreeditState.rewriteLock && !nonPreeditState.nonPreeditKeys.empty()) {
-            const fcitx::Key nonPreeditKey = nonPreeditState.nonPreeditKeys.front();
-            nonPreeditState.nonPreeditKeys.pop_front();
-            const bool handled =
-                processNonPreeditKey(ic, state, nonPreeditKey, adapterShared, debug);
-            if (!handled) {
-                forwardKeyPressAndRelease(ic, nonPreeditKey);
-            }
-        }
-        nonPreeditState.processingNonPreedit = false;
-    }
-
-    DeltaModeDeps deps_;
-};
-
-} // namespace
-
-OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
+FcitxOpenKeyEngine::FcitxOpenKeyEngine(fcitx::Instance *instance)
     : instance_(instance), adapter_(std::make_shared<OpenKeyAdapter>()) {
     lifetime_ = std::make_shared<int>(1);
     instance_->inputContextManager().registerProperty("openkeyState", &factory_);
-    remoteNonPreeditCoordinator_ = std::make_unique<RemoteNonPreeditCoordinator>(
+    remoteNonPreeditCoordinator_ = std::make_unique<FcitxRemoteNonPreeditCoordinator>(
         instance_ ? &instance_->eventLoop() : nullptr,
         [this](fcitx::InputContext *ic, uint64_t sessionId, uint64_t txId) {
             handleRemoteNonPreeditDone(ic, sessionId, txId);
         },
         [this]() { return debugEnabled(); });
-    focusedAppBridge_ = std::make_unique<FocusedAppBridge>(
+    focusedAppBridge_ = std::make_unique<FcitxFocusedAppBridge>(
         instance_ ? &instance_->eventLoop() : nullptr,
         [this]() { return debugEnabled(); });
-    DeltaModeDeps deltaDeps;
-    deltaDeps.instance = instance_;
-    deltaDeps.factory = &factory_;
+    BackspaceModeDeps deltaDeps;
     deltaDeps.adapter = adapter_;
-    deltaDeps.backspaceInjector = &g_backspaceInjector;
-    deltaDeps.lifetimeWeak = lifetime_;
     deltaDeps.debugEnabled = [this]() { return debugEnabled(); };
     deltaDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
     deltaDeps.restoreIfWrongSpelling = [this]() {
@@ -3209,13 +939,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
         return config_.enableBackspaceSnapshot.value();
     };
     backspaceRewriteHandler_ =
-        std::make_unique<BackspaceRewriteModeHandler>(std::move(deltaDeps));
-    DeltaModeDeps nonPreeditDeltaDeps;
-    nonPreeditDeltaDeps.instance = instance_;
-    nonPreeditDeltaDeps.factory = &factory_;
+        createBackspaceRewriteModeHandler(std::move(deltaDeps));
+    BackspaceModeDeps nonPreeditDeltaDeps;
     nonPreeditDeltaDeps.adapter = adapter_;
-    nonPreeditDeltaDeps.backspaceInjector = &g_backspaceInjector;
-    nonPreeditDeltaDeps.lifetimeWeak = lifetime_;
     nonPreeditDeltaDeps.debugEnabled = [this]() { return debugEnabled(); };
     nonPreeditDeltaDeps.enableMacro = [this]() {
         return config_.enableMacro.value();
@@ -3229,21 +955,12 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     nonPreeditDeltaDeps.nonPreeditRemoteEnabled = [this]() {
         return remoteNonPreeditCoordinator_ && remoteNonPreeditCoordinator_->enabled();
     };
-    nonPreeditDeltaDeps.nonPreeditRemoteSchedule =
-        [this](fcitx::InputContext *ic, OpenKeyState &state,
-               unsigned int deleteCount, uint64_t interBackspaceUsec,
-               uint64_t commitDelayUsec) {
-            return scheduleRemoteNonPreeditRewrite(ic, state, deleteCount,
-                                              interBackspaceUsec,
-                                              commitDelayUsec);
-        };
     nonPreeditBackspaceRewriteHandler_ =
-        std::make_unique<NonPreeditBackspaceRewriteModeHandler>(
+        createNonPreeditBackspaceRewriteModeHandler(
             std::move(nonPreeditDeltaDeps));
 
-    SimpleModeHandlerDeps simpleDeps;
+    TextModeHandlerDeps simpleDeps;
     simpleDeps.adapter = adapter_;
-    simpleDeps.debugEnabled = [this]() { return debugEnabled(); };
     simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
     simpleDeps.restoreIfWrongSpelling = [this]() {
         return config_.restoreIfWrongSpelling.value();
@@ -3252,7 +969,8 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
         return config_.enableBackspaceSnapshot.value();
     };
     preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
-    surroundingTextHandler_ = std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
+    surroundingTextHandler_ =
+        std::make_unique<SurroundingTextModeHandler>(std::move(simpleDeps));
     reloadConfig();
     if (remoteNonPreeditCoordinator_) {
         remoteNonPreeditCoordinator_->ensureAvailableOrStartOnce();
@@ -3262,14 +980,14 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     g_backspaceInjector.uinputAvailable(debugEnabled());
 }
 
-OpenKeyEngine::~OpenKeyEngine() {
+FcitxOpenKeyEngine::~FcitxOpenKeyEngine() {
     focusedAppBridge_.reset();
     remoteNonPreeditCoordinator_.reset();
     adapter_.reset();
     lifetime_.reset();
 }
 
-std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
+std::string FcitxOpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
                                            fcitx::InputContext &ic) {
     auto *state = stateFor(&ic);
 
@@ -3313,7 +1031,7 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
     return label;
 }
 
-std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
+std::string FcitxOpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
                                   fcitx::InputContext &ic) {
     auto *state = stateFor(&ic);
     if (!state) {
@@ -3336,7 +1054,7 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
     return {};
 }
 
-bool OpenKeyEngine::debugEnabled() const {
+bool FcitxOpenKeyEngine::debugEnabled() const {
     if (config_.debug.value()) {
         return true;
     }
@@ -3344,11 +1062,11 @@ bool OpenKeyEngine::debugEnabled() const {
     return env && env[0] && env[0] != '0';
 }
 
-bool OpenKeyEngine::nonPreeditServerAvailable() {
+bool FcitxOpenKeyEngine::nonPreeditServerAvailable() {
     return remoteNonPreeditCoordinator_ && remoteNonPreeditCoordinator_->available();
 }
 
-void OpenKeyEngine::loadAppModes() {
+void FcitxOpenKeyEngine::loadAppModes() {
     auto loadOne = [](const char *path,
                       std::unordered_map<std::string, RuntimeMode> &out) {
         out.clear();
@@ -3379,7 +1097,7 @@ void OpenKeyEngine::loadAppModes() {
     loadOne("conf/openkey-appmodes-wayland.conf", waylandAppModeMap_);
 }
 
-void OpenKeyEngine::persistAppModes() {
+void FcitxOpenKeyEngine::persistAppModes() {
     auto persistOne = [](const char *path,
                          const std::unordered_map<std::string, RuntimeMode> &map) {
         fcitx::RawConfig raw;
@@ -3396,7 +1114,7 @@ void OpenKeyEngine::persistAppModes() {
     persistOne("conf/openkey-appmodes-wayland.conf", waylandAppModeMap_);
 }
 
-void OpenKeyEngine::setAppModeForProgram(fcitx::InputContext *ic,
+void FcitxOpenKeyEngine::setAppModeForProgram(fcitx::InputContext *ic,
                                          const std::string &program,
                                          RuntimeMode mode) {
     const auto normalized = normalizedProgramName(program);
@@ -3406,17 +1124,31 @@ void OpenKeyEngine::setAppModeForProgram(fcitx::InputContext *ic,
     appModeMapFor(ic)[normalized] = mode;
 }
 
-std::unordered_map<std::string, RuntimeMode> &OpenKeyEngine::appModeMapFor(
+std::unordered_map<std::string, RuntimeMode> &FcitxOpenKeyEngine::appModeMapFor(
     fcitx::InputContext *ic) {
     return isRunningOnX11(ic) ? x11AppModeMap_ : waylandAppModeMap_;
 }
 
-OpenKeyState *OpenKeyEngine::stateFor(fcitx::InputContext *ic) {
+FcitxOpenKeyState *FcitxOpenKeyEngine::stateFor(fcitx::InputContext *ic) {
     return ic->propertyFor(&factory_);
 }
 
-bool OpenKeyEngine::scheduleRemoteNonPreeditRewrite(
-    fcitx::InputContext *ic, OpenKeyState &state, unsigned int deleteCount,
+static void cancelRewriteTimers(IMContext &context, FcitxOpenKeyState &state) {
+    context.cancelTimer(state.delta.commitTimer);
+    context.cancelTimer(state.delta.ackTimeoutTimer);
+    context.cancelTimer(state.nonPreeditDelta.commitTimer);
+    context.cancelTimer(state.nonPreeditDelta.lateBackspaceTimeoutTimer);
+    context.cancelTimer(state.nonPreeditDelta.ackTimeoutTimer);
+}
+
+static void clearRewriteState(IMContext &context, FcitxOpenKeyState &state) {
+    cancelRewriteTimers(context, state);
+    state.delta.clear();
+    state.nonPreeditDelta.clear();
+}
+
+bool FcitxOpenKeyEngine::scheduleRemoteNonPreeditRewrite(
+    fcitx::InputContext *ic, FcitxOpenKeyState &state, unsigned int deleteCount,
     uint64_t interBackspaceUsec, uint64_t commitDelayUsec) {
     if (!remoteNonPreeditCoordinator_ || !remoteNonPreeditCoordinator_->enabled() || !ic) {
         return false;
@@ -3445,7 +1177,7 @@ bool OpenKeyEngine::scheduleRemoteNonPreeditRewrite(
     return true;
 }
 
-void OpenKeyEngine::handleRemoteNonPreeditDone(fcitx::InputContext *ic,
+void FcitxOpenKeyEngine::handleRemoteNonPreeditDone(fcitx::InputContext *ic,
                                           uint64_t sessionId, uint64_t txId) {
     auto *state = stateFor(ic);
     if (!state) {
@@ -3458,23 +1190,40 @@ void OpenKeyEngine::handleRemoteNonPreeditDone(fcitx::InputContext *ic,
         return;
     }
 
-    auto *nonPreeditHandler =
-        dynamic_cast<NonPreeditBackspaceRewriteModeHandler *>(
-            nonPreeditBackspaceRewriteHandler_.get());
-    if (!nonPreeditHandler) {
+    if (!nonPreeditBackspaceRewriteHandler_) {
         return;
     }
-    nonPreeditHandler->handleRemoteCommitAction(ic, *state, txId);
+    auto imContext = std::make_shared<FcitxIMContext>(ic, instance_, lifetime_);
+    auto rewriteContext = std::make_shared<FcitxRewriteContext>(
+        imContext,
+        [this, ic, state](int count, uint64_t interKeyUsec) {
+            const auto method = g_backspaceInjector.sendBackspaces(
+                ic, state ? state->program : std::string(), count,
+                debugEnabled(), interKeyUsec);
+            return method == FcitxBackspaceInjector::Method::Uinput
+                       ? BackspaceMethod::Uinput
+                       : BackspaceMethod::None;
+        },
+        [](unsigned int, uint64_t, uint64_t) { return false; },
+        [ic](std::string_view shownText, bool requireSurroundingText) {
+            return trackedWordStillBeforeCursor(
+                ic, std::string(shownText), requireSurroundingText);
+        },
+        [ic](std::string_view shownText) {
+            return looksLikeBrowserAutocomplete(ic, std::string(shownText));
+        });
+    nonPreeditBackspaceRewriteHandler_->handleRemoteCommitAction(
+        rewriteContext, *state, txId);
 }
 
-const fcitx::Configuration *OpenKeyEngine::getConfig() const { return &config_; }
+const fcitx::Configuration *FcitxOpenKeyEngine::getConfig() const { return &config_; }
 
-void OpenKeyEngine::setConfig(const fcitx::RawConfig &config) {
+void FcitxOpenKeyEngine::setConfig(const fcitx::RawConfig &config) {
     config_.load(config, true);
     applyConfig();
 }
 
-void OpenKeyEngine::reloadConfig() {
+void FcitxOpenKeyEngine::reloadConfig() {
     fcitx::readAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                      "conf/openkey.conf");
     fcitx::readAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
@@ -3483,7 +1232,7 @@ void OpenKeyEngine::reloadConfig() {
     applyConfig();
 }
 
-void OpenKeyEngine::applyConfig() {
+void FcitxOpenKeyEngine::applyConfig() {
     adapter_->setInputType(toOpenKeyInputType(config_.inputType.value()));
     adapter_->setFreeMark(config_.freeMark.value());
     adapter_->setCodeTable(toOpenKeyCodeTable(config_.codeTable.value()));
@@ -3516,24 +1265,24 @@ void OpenKeyEngine::applyConfig() {
     }
 }
 
-void OpenKeyEngine::persistConfig() {
+void FcitxOpenKeyEngine::persistConfig() {
     fcitx::safeSaveAsIni(config_, fcitx::StandardPath::Type::PkgConfig,
                          "conf/openkey.conf");
     fcitx::safeSaveAsIni(macroTables_, fcitx::StandardPath::Type::PkgConfig,
                          "conf/openkey-macro-table.conf");
 }
 
-void OpenKeyEngine::save() { persistConfig(); }
+void FcitxOpenKeyEngine::save() { persistConfig(); }
 
 const fcitx::Configuration *
-OpenKeyEngine::getSubConfig(const std::string &path) const {
+FcitxOpenKeyEngine::getSubConfig(const std::string &path) const {
     if (path == "openkey-macro") {
         return &macroTables_;
     }
     return nullptr;
 }
 
-void OpenKeyEngine::setSubConfig(const std::string &path,
+void FcitxOpenKeyEngine::setSubConfig(const std::string &path,
                                  const fcitx::RawConfig &config) {
     if (path == "openkey-macro") {
         macroTables_.load(config, true);
@@ -3551,12 +1300,12 @@ void OpenKeyEngine::setSubConfig(const std::string &path,
     }
 }
 
-void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
+void FcitxOpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
-    state->delta.clear();
-    state->nonPreeditDelta.clear();
+    FcitxIMContext context(ic, instance_, lifetime_);
+    clearRewriteState(context, *state);
     state->composing.clear();
     state->preeditKeyBuffer.clear();
     state->macroBuffer.clear();
@@ -3586,23 +1335,23 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
     state->autoMode = state->mode;
     state->modeDecided = true;
 
-    ic->inputPanel().reset();
-    ic->updatePreedit();
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+    context.clearPreedit();
 }
 
-void OpenKeyEngine::deactivate(const fcitx::InputMethodEntry &entry,
+void FcitxOpenKeyEngine::deactivate(const fcitx::InputMethodEntry &entry,
                                fcitx::InputContextEvent &event) {
-    auto *state = stateFor(event.inputContext());
-    state->delta.clear();
-    state->nonPreeditDelta.clear();
+    auto *ic = event.inputContext();
+    auto *state = stateFor(ic);
+    FcitxIMContext context(ic, instance_, lifetime_);
+    clearRewriteState(context, *state);
     reset(entry, event);
 }
 
-void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
+void FcitxOpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                           fcitx::InputContextEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
+    FcitxIMContext context(ic, instance_, lifetime_);
     const bool snapshotEnabled = config_.enableBackspaceSnapshot.value();
 
     const bool transientResetKeepDelta =
@@ -3710,8 +1459,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                      << state->nonPreeditDelta.allowTransientResetPreserve;
     }
 
-    state->delta.clear();
-    state->nonPreeditDelta.clear();
+    clearRewriteState(context, *state);
 
     if (preserveDelta) {
         state->delta.shownText = deltaShown;
@@ -3799,13 +1547,11 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
     state->rollbackSnapshotRawBuffer.clear();
     state->canReseedRollbackSnapshot = false;
 
-    ic->inputPanel().reset();
-    ic->updatePreedit();
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+    context.clearPreedit();
 }
 
-RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
-                                         OpenKeyState &s,
+RuntimeMode FcitxOpenKeyEngine::decideMode(fcitx::InputContext *ic,
+                                         FcitxOpenKeyState &s,
                                          bool writeBack) {
     // Password field should never attempt to do any composition.
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
@@ -3861,22 +1607,48 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic,
     return mode;
 }
 
-RuntimeMode OpenKeyEngine::firstManualMode() const {
+RuntimeMode FcitxOpenKeyEngine::firstManualMode() const {
     return RuntimeMode::NonPreeditBackspaceRewrite;
 }
 
 
 
-void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
+void FcitxOpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                              fcitx::KeyEvent &event) {
     auto *ic = event.inputContext();
     auto *state = stateFor(ic);
+    auto textContext = std::make_shared<FcitxIMContext>(ic, instance_, lifetime_);
+    auto backspaceContext = std::make_shared<FcitxRewriteContext>(
+        textContext,
+        [this, ic, state](int count, uint64_t interKeyUsec) {
+            const auto method = g_backspaceInjector.sendBackspaces(
+                ic, state ? state->program : std::string(), count,
+                debugEnabled(), interKeyUsec);
+            return method == FcitxBackspaceInjector::Method::Uinput
+                       ? BackspaceMethod::Uinput
+                       : BackspaceMethod::None;
+        },
+        [this, ic, state](unsigned int deleteCount,
+                          uint64_t interBackspaceUsec,
+                          uint64_t commitDelayUsec) {
+            return state && scheduleRemoteNonPreeditRewrite(
+                                ic, *state, deleteCount, interBackspaceUsec,
+                                commitDelayUsec);
+        },
+        [ic](std::string_view shownText, bool requireSurroundingText) {
+            return trackedWordStillBeforeCursor(
+                ic, std::string(shownText), requireSurroundingText);
+        },
+        [ic](std::string_view shownText) {
+            return looksLikeBrowserAutocomplete(ic, std::string(shownText));
+        });
 
     if (event.isRelease()) {
         return;
     }
 
     const auto key = event.key().normalize();
+    const KeyInfo keyInfo = keyInfoFromFcitxEvent(event);
 
     // Ensure we have a baseline auto mode for this context.
     if (!state->modeDecided) {
@@ -3886,9 +1658,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     }
 
     if (key.checkKeyList(config_.switchModeKey.value()) && key.sym() != FcitxKey_None) {
-            auto clearComposingState = [this, ic, state]() {
-                state->delta.clear();
-                state->nonPreeditDelta.clear();
+            auto clearComposingState = [&textContext, state]() {
+                clearRewriteState(*textContext, *state);
                 state->composing.clear();
                 state->preeditKeyBuffer.clear();
                 state->macroBuffer.clear();
@@ -3900,9 +1671,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                 state->rollbackSnapshotRawBuffer.clear();
                 state->canReseedRollbackSnapshot = false;
                 state->noSeedNextWord = false;
-                ic->inputPanel().reset();
-                ic->updatePreedit();
-                ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+                textContext->clearPreedit();
             };
 
         bool returnToAuto = false;
@@ -4050,36 +1819,47 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
         return;
     case RuntimeMode::BackspaceRewriteDelta:
         if (backspaceRewriteHandler_) {
-            backspaceRewriteHandler_->handleKey(ic, event, *state);
+            if (backspaceRewriteHandler_->handleKey(backspaceContext, keyInfo,
+                                                    *state)) {
+                event.filterAndAccept();
+            }
         }
         return;
     case RuntimeMode::NonPreeditBackspaceRewrite:
         if (nonPreeditBackspaceRewriteHandler_) {
-            nonPreeditBackspaceRewriteHandler_->handleKey(ic, event, *state);
+            if (nonPreeditBackspaceRewriteHandler_->handleKey(
+                    backspaceContext, keyInfo, *state)) {
+                event.filterAndAccept();
+            }
         }
         return;
     case RuntimeMode::Preedit:
         adapter_->setCodeTable(state->codeTable);
         if (preeditHandler_) {
-            preeditHandler_->handleKey(ic, event, *state);
+            if (preeditHandler_->handleKey(*textContext, keyInfo, *state)) {
+                event.filterAndAccept();
+            }
         }
         return;
     case RuntimeMode::SurroundingText:
         adapter_->setCodeTable(state->codeTable);
         if (surroundingTextHandler_) {
-            surroundingTextHandler_->handleKey(ic, event, *state);
+            if (surroundingTextHandler_->handleKey(*textContext, keyInfo,
+                                                   *state)) {
+                event.filterAndAccept();
+            }
         }
         return;
     }
 }
 
-class OpenKeyEngineFactory final : public fcitx::AddonFactory {
+class FcitxOpenKeyEngineFactory final : public fcitx::AddonFactory {
 public:
     fcitx::AddonInstance *create(fcitx::AddonManager *manager) override {
-        return new OpenKeyEngine(manager->instance());
+        return new FcitxOpenKeyEngine(manager->instance());
     }
 };
 
 } // namespace openkey
 
-FCITX_ADDON_FACTORY(openkey::OpenKeyEngineFactory)
+FCITX_ADDON_FACTORY(openkey::FcitxOpenKeyEngineFactory)

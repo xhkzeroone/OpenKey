@@ -38,7 +38,15 @@ target_sources(openkey PRIVATE
     src/openkey.conf.in
     src/openkey_adapter.cpp
     src/openkey_adapter.h
+    src/openkey_backspace_mode_handler.cpp
+    src/openkey_backspace_mode_handler.h
     src/openkey_engine_globals.cpp
+    src/openkey_fcitx_context.cpp
+    src/openkey_fcitx_context.h
+    src/openkey_platform.h
+    src/openkey_state.h
+    src/openkey_text_mode_handler.cpp
+    src/openkey_text_mode_handler.h
     src/surrounding_text_utils.cpp
     src/surrounding_text_utils.h
 
