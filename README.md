@@ -24,9 +24,8 @@ OpenKey Linux không chạy như một app riêng. Nó hoạt động theo mô h
 - `surrounding text`: sửa trực tiếp từ đang gõ nếu ứng dụng hỗ trợ tốt
 - `preedit`: hiện vùng gõ tạm, phù hợp hơn với browser/Electron
 - `NonPreedit`: không hiện preedit, dùng backspace thật rồi commit lại chữ đã sửa
-- `backspace rewrite`: fallback khi helper `NonPreedit` không sẵn sàng
 
-Ở chế độ tự động, OpenKey chọn mode khi focus vào ô nhập liệu. Mặc định OpenKey ưu tiên `NonPreedit` nếu helper server kết nối được. Riêng browser trên X11 sẽ dùng `preedit` để tránh lỗi rewrite/backspace trong thanh nhập liệu. Nếu helper không chạy được hoặc không có quyền `/dev/uinput`, OpenKey sẽ rơi về `backspace rewrite`.
+Ở chế độ tự động, OpenKey chọn mode khi focus vào ô nhập liệu. Mặc định OpenKey ưu tiên `NonPreedit` nếu helper server kết nối được. Riêng browser trên X11 sẽ dùng `preedit` để tránh lỗi rewrite/backspace trong thanh nhập liệu. Nếu helper không chạy được hoặc không có quyền `/dev/uinput`, OpenKey sẽ dùng `preedit`.
 
 Vì vậy nếu "cài xong nhưng không gõ được", nguyên nhân thường không nằm ở core OpenKey mà nằm ở một trong các lớp sau:
 
@@ -398,7 +397,7 @@ Cách xử lý:
 
 Script `./scripts/install.sh` đã cố gắng làm sẵn phần này trên Debian/Ubuntu.
 
-Nếu helper không mở được `/dev/uinput`, triệu chứng có thể là mode tự động rơi về fallback, hoặc trong bản debug sẽ thấy log kiểu `uinput backspace failed`.
+Nếu helper không mở được `/dev/uinput`, mode tự động sẽ dùng `preedit`; trong bản debug có thể thấy log kiểu `uinput backspace failed`.
 
 ### 8. Gõ được lúc đầu, sau đó một số app không nhận đúng mode
 

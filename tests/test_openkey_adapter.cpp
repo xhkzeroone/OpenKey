@@ -84,18 +84,12 @@ unsigned int utf8CharCount(const std::string &s) {
     return static_cast<unsigned int>(fcitx::utf8::length(s));
 }
 
-enum class BackspaceSnapshotMode {
-    Delta,
-    NonPreeditRemote,
-};
-
 std::string quote(const std::string &s) {
     return "\"" + s + "\"";
 }
 
 std::string simulateBackspaceSnapshot(openkey::OpenKeyAdapter &adapter,
-                                      const std::string &ascii,
-                                      BackspaceSnapshotMode mode) {
+                                      const std::string &ascii) {
     std::string shown;
     std::string rawAscii;
     std::string appText;
@@ -104,9 +98,7 @@ std::string simulateBackspaceSnapshot(openkey::OpenKeyAdapter &adapter,
     bool canReseedFromSnapshot = false;
     std::ostringstream out;
 
-    out << (mode == BackspaceSnapshotMode::Delta ? "mode=backspace"
-                                                 : "mode=nonPreedit")
-        << "\n";
+    out << "mode=nonPreedit\n";
     for (char c : ascii) {
         if (c == ' ') {
             if (!shown.empty()) {
@@ -159,13 +151,6 @@ std::string simulateBackspaceSnapshot(openkey::OpenKeyAdapter &adapter,
         if (deleteCount == 0) {
             appText += commitText;
             out << "key " << c << ": commit " << quote(commitText)
-                << " -> app=" << quote(appText) << " shown="
-                << quote(r.newWord) << "\n";
-        } else if (mode == BackspaceSnapshotMode::Delta) {
-            appText = utf8DropLastN(appText, deleteCount);
-            appText += commitText;
-            out << "key " << c << ": inject backspaces=" << deleteCount
-                << " + sentinel=1; commit " << quote(commitText)
                 << " -> app=" << quote(appText) << " shown="
                 << quote(r.newWord) << "\n";
         } else {
@@ -284,33 +269,8 @@ int main() {
     }
     {
         auto snapshotAdapter = makeAdapter();
-        expectEq("backspace snapshot",
-                 simulateBackspaceSnapshot(snapshotAdapter, "as",
-                                           BackspaceSnapshotMode::Delta),
-                 "mode=backspace\n"
-                 "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
-                 "key s: inject backspaces=1 + sentinel=1; commit \"á\" -> app=\"á\" shown=\"á\"\n"
-                 "final app=\"á\" shown=\"á\"");
-    }
-    {
-        auto snapshotAdapter = makeAdapter();
-        expectEq("backspace reseed snapshot",
-                 simulateBackspaceSnapshot(snapshotAdapter, "as <f",
-                                           BackspaceSnapshotMode::Delta),
-                 "mode=backspace\n"
-                 "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
-                 "key s: inject backspaces=1 + sentinel=1; commit \"á\" -> app=\"á\" shown=\"á\"\n"
-                 "key space: forward -> app=\"á \" shown=\"\" snapshot=\"á\"\n"
-                 "key backspace: forward -> app=\"á\" shown=\"á\"\n"
-                 "key f: inject backspaces=1 + sentinel=1; commit \"à\" -> app=\"à\" shown=\"à\"\n"
-                 "final app=\"à\" shown=\"à\"");
-    }
-    {
-        auto snapshotAdapter = makeAdapter();
         expectEq("nonPreedit snapshot",
-                 simulateBackspaceSnapshot(
-                     snapshotAdapter, "as",
-                     BackspaceSnapshotMode::NonPreeditRemote),
+                 simulateBackspaceSnapshot(snapshotAdapter, "as"),
                  "mode=nonPreedit\n"
                  "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
                  "key s: helper PLAN backspaces=1; helper DONE; commit \"á\" -> app=\"á\" shown=\"á\"\n"
@@ -319,9 +279,7 @@ int main() {
     {
         auto snapshotAdapter = makeAdapter();
         expectEq("nonPreedit reseed snapshot",
-                 simulateBackspaceSnapshot(
-                     snapshotAdapter, "as <f",
-                     BackspaceSnapshotMode::NonPreeditRemote),
+                 simulateBackspaceSnapshot(snapshotAdapter, "as <f"),
                  "mode=nonPreedit\n"
                  "key a: commit \"a\" -> app=\"a\" shown=\"a\"\n"
                  "key s: helper PLAN backspaces=1; helper DONE; commit \"á\" -> app=\"á\" shown=\"á\"\n"
