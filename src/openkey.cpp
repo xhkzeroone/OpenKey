@@ -6,6 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <functional>
+#include <iterator>
 #include <thread>
 #include <mutex>
 #include <sstream>
@@ -450,6 +451,22 @@ static std::string utf8DropLastN(const std::string &s, size_t n) {
     return std::string(s.begin(), it);
 }
 
+static size_t utf8ByteOffsetForCharIndex(const std::string &s,
+                                         size_t charIndex) {
+    const auto len = fcitx::utf8::length(s);
+    if (charIndex >= len) {
+        return s.size();
+    }
+    auto it = fcitx::utf8::nextNChar(s.begin(), charIndex);
+    return static_cast<size_t>(std::distance(s.begin(), it));
+}
+
+static size_t utf8CharIndexForByteOffset(const std::string &s,
+                                         size_t byteOffset) {
+    byteOffset = std::min(byteOffset, s.size());
+    return fcitx::utf8::length(std::string(s.begin(), s.begin() + byteOffset));
+}
+
 static bool hasCtrlAltSuperMeta(const fcitx::Key &key) {
     const auto states = key.states();
     return states.test(fcitx::KeyState::Ctrl) || states.test(fcitx::KeyState::Alt) ||
@@ -651,7 +668,7 @@ static bool needsTransientResetPreserve(const std::string &program) {
 
 static bool isBrowserLikeProgram(const std::string &program) {
     if (program.empty()) {
-        return false;
+        return true; // Assume browser-like if program name is unknown.
     }
 
     const std::string base = normalizedProgramName(program);
@@ -718,13 +735,28 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
         return false;
     }
 
-    size_t rangeStart = cursor >= shownLen ? cursor - shownLen : 0;
-    size_t pb = text.find(shownText);
+    unsigned int prefixCursor = cursor;
+    if (cursor != anchor) {
+        const unsigned int selectionStart = std::min(cursor, anchor);
+        const unsigned int selectionEnd = std::max(cursor, anchor);
+        if (selectionEnd == cursor) {
+            prefixCursor = selectionStart;
+        }
+    }
 
-    bool samePrefix =
-        pb != std::string::npos &&
-        pb >= rangeStart &&
-        pb <= cursor;
+    const size_t rangeStart =
+        prefixCursor >= shownLen ? prefixCursor - shownLen : 0;
+
+    bool samePrefix = false;
+    for (size_t pb = text.find(shownText);
+         pb != std::string::npos;
+         pb = text.find(shownText, pb + 1)) {
+        const size_t pbChar = utf8CharIndexForByteOffset(text, pb);
+        if (pbChar >= rangeStart && pbChar + shownLen == prefixCursor) {
+            samePrefix = true;
+            break;
+        }
+    }
 
     if (!samePrefix) {
         return false;
@@ -734,8 +766,10 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
         if (from > to) {
             std::swap(from, to);
         }
-        size_t p = text.find('\n', from);
-        return p != std::string::npos && p < to;
+        const size_t fromByte = utf8ByteOffsetForCharIndex(text, from);
+        const size_t toByte = utf8ByteOffsetForCharIndex(text, to);
+        const size_t p = text.find('\n', fromByte);
+        return p != std::string::npos && p < toByte;
     };
 
     // Case 1: omnibox/autocomplete thường select phần phía sau cursor tới cuối dòng.
@@ -745,11 +779,18 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
 
         bool selectionTouchesCursor =
             selectionStart == cursor ||
+            selectionEnd == cursor ||
             (selectionStart < cursor && selectionEnd > cursor);
 
-        bool selectionGoesToLineEnd =
-            selectionEnd == textLen ||
-            text.find('\n', selectionEnd) == std::string::npos;
+        const size_t selectionStartByte =
+            utf8ByteOffsetForCharIndex(text, selectionStart);
+        const size_t nextLineBreak = text.find('\n', selectionStartByte);
+        const size_t lineEnd =
+            nextLineBreak == std::string::npos
+                ? textLen
+                : utf8CharIndexForByteOffset(text, nextLineBreak);
+        const bool selectionGoesToLineEnd =
+            static_cast<size_t>(selectionEnd) == lineEnd;
 
         return selectionTouchesCursor &&
                selectionGoesToLineEnd &&
@@ -759,7 +800,8 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
     // Case 2: không selection nhưng sau cursor có text tự mọc thêm.
     // Giống browser search/address autocomplete.
     if (cursor < textLen) {
-        if (text.find('\n', cursor) != std::string::npos) {
+        const size_t cursorByte = utf8ByteOffsetForCharIndex(text, cursor);
+        if (text.find('\n', cursorByte) != std::string::npos) {
             return false;
         }
 
