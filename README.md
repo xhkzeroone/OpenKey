@@ -3,9 +3,12 @@
 OpenKey trong repo này là addon gõ tiếng Việt cho `fcitx5` trên Linux.
 Phần xử lý tiếng Việt dùng lại core ở `Sources/OpenKey/engine`, còn phần Linux được build thành addon `openkey.so` để `fcitx5` nạp vào.
 
-Ngoài addon chính, repo hiện có helper `openkey-nonpreedit-server` viết bằng Go. Helper này được cài vào `libexec`, được addon tự spawn khi cần, dùng `/dev/uinput` để bơm `BackSpace` thật trong mode `NonPreedit`, và sẽ tự tắt khi `fcitx5`/addon tắt.
+Ngoài addon chính, repo hiện có helper `openkey-nonpreedit-server` viết bằng
+Go. Helper này được cài vào `libexec`, được addon tự spawn khi cần, dùng
+`/dev/uinput` để bơm `BackSpace` thật trong mode `Non Preedit`, và sẽ tự tắt
+khi `fcitx5`/addon tắt.
 
-README này chỉ ghi cho bản Linux, tập trung vào:
+README này ghi cho bản Linux, tập trung vào:
 
 - cơ chế hoạt động
 - cách cài
@@ -21,10 +24,15 @@ OpenKey Linux không chạy như một app riêng. Nó hoạt động theo mô h
 3. Core OpenKey xử lý Telex/VNI/Simple Telex, kiểm tra dấu, chính tả, bảng mã.
 4. Kết quả được trả lại ứng dụng theo một trong các cách sau:
 
-- `preedit`: hiện vùng gõ tạm, phù hợp hơn với browser/Electron
-- `NonPreedit`: không hiện preedit, dùng backspace thật rồi commit lại chữ đã sửa
+- `Preedit`: hiện vùng gõ tạm rồi commit khi gặp phím kết thúc từ
+- `Non Preedit`: không hiện preedit, dùng backspace thật rồi commit lại chữ đã sửa
+- `Direct`: chuyển thẳng phím cho ứng dụng, dùng cho ô mật khẩu
 
-Ở chế độ tự động, OpenKey chọn mode khi focus vào ô nhập liệu. Mặc định OpenKey ưu tiên `NonPreedit` nếu helper server kết nối được. Riêng browser trên X11 sẽ dùng `preedit` để tránh lỗi rewrite/backspace trong thanh nhập liệu. Nếu helper không chạy được hoặc không có quyền `/dev/uinput`, OpenKey sẽ dùng `preedit`.
+Ở chế độ tự động, OpenKey chọn mode khi focus vào ô nhập liệu. Nếu ô nhập là
+password thì dùng `Direct`. Với app Firefox-like, OpenKey mặc định dùng
+`Preedit`. Các app khác sẽ dùng `Non Preedit` nếu helper server sẵn sàng; nếu
+helper không chạy được hoặc không có quyền `/dev/uinput`, OpenKey dùng
+`Preedit`.
 
 Vì vậy nếu "cài xong nhưng không gõ được", nguyên nhân thường không nằm ở core OpenKey mà nằm ở một trong các lớp sau:
 
@@ -32,20 +40,24 @@ Vì vậy nếu "cài xong nhưng không gõ được", nguyên nhân thường 
 - môi trường input method chưa trỏ sang `fcitx5`
 - frontend GTK/Qt chưa có
 - addon chưa được add vào `fcitx5`
-- thiếu Go khi build nên helper `NonPreedit` không được tạo
+- thiếu Go khi build nên helper `Non Preedit` không được tạo
 - `/dev/uinput` chưa có hoặc không đủ quyền
-- ứng dụng hiện tại không hợp với mode đang dùng
+- ứng dụng hiện tại không hợp với mode đang dùng hoặc đang lưu mode cũ theo app
 
 ## Tính năng chính
 
-- Kiểu gõ `Telex`, `VNI`, `Simple Telex`
-- Bảng mã `Unicode`, `TCVN3`, `VNI Windows`
+- Kiểu gõ `Telex`, `VNI`, `Simple Telex 1`, `Simple Telex 2`
+- Bảng mã `Unicode`, `TCVN3 (ABC)`, `VNI Windows`, `Unicode tổ hợp`,
+  `Vietnamese Locale CP 1258`
 - Kiểm tra chính tả
-- Quick Telex
-- Modern orthography
-- Macro
+- Tự trả phím khi gõ sai chính tả
+- Cho phép Backspace quay lại sửa từ vừa gõ
+- Giữ nguyên `W` ở đầu từ
+- Cho phép gõ phụ âm `Z`, `F`, `W`, `J`
+- Đặt dấu kiểu mới: `oà`, `uý` thay vì `òa`, `úy`
+- Macro / gõ tắt qua cấu hình Fcitx5
 - Chuyển mode theo từng ứng dụng
-- Hotkey đổi mode compose, mặc định là `Alt+Space`
+- Hotkey đổi mode gõ, mặc định là `Alt+Space`
 
 ## Yêu cầu
 
@@ -56,9 +68,9 @@ Bạn cần tối thiểu:
 - compiler C++17
 - `pkg-config`
 - thư viện dev của `fcitx5`
-- Go `1.21+` nếu muốn build helper `openkey-nonpreedit-server`
+- Go nếu muốn build helper `openkey-nonpreedit-server`
 
-Nếu muốn `NonPreedit` hoạt động ổn định thì cần:
+Nếu muốn `Non Preedit` hoạt động ổn định thì cần:
 
 - có thiết bị `/dev/uinput`
 - user hiện tại có quyền truy cập `/dev/uinput`
@@ -134,7 +146,7 @@ sudo pacman -S --needed \
 
 ## Cài OpenKey
 
-### Cách nhanh nhất trên Debian / Ubuntu
+### Cách nhanh nhất trên Debian / Ubuntu từ source
 
 Repo có sẵn script:
 
@@ -146,7 +158,7 @@ Script này sẽ:
 
 - cài dependencies bằng `apt`
 - build addon
-- build và cài `openkey-nonpreedit-server`
+- build và cài `openkey-nonpreedit-server` nếu có Go
 - cài vào hệ thống
 - cấu hình quyền cơ bản cho `/dev/uinput`
 - restart `fcitx5`
@@ -174,7 +186,10 @@ cmake --build build -j
 sudo cmake --install build
 ```
 
-Nếu CMake tìm thấy `go`, lệnh build sẽ tạo thêm binary `openkey-nonpreedit-server` và lệnh install sẽ cài nó vào `libexec`. Nếu không có Go, addon vẫn build được nhưng mode tự động sẽ dùng fallback thay vì helper `NonPreedit`.
+Nếu CMake tìm thấy `go`, lệnh build sẽ tạo thêm binary
+`openkey-nonpreedit-server` và lệnh install sẽ cài nó vào `libexec`. Nếu không
+có Go, addon vẫn build được nhưng mode tự động sẽ dùng `Preedit` thay vì
+`Non Preedit`.
 
 Khởi động lại `fcitx5`:
 
@@ -199,9 +214,15 @@ cmake --install build
 fcitx5 -rd
 ```
 
-### Đóng gói .deb / .rpm
+### Cài từ file .deb
 
-Xem hướng dẫn đóng gói ở [PACKAGING.md](PACKAGING.md).
+Nếu bạn tải `.deb` từ GitHub Release hoặc tự build package trong `dist/`, cài
+bằng:
+
+```bash
+sudo apt install ./dist/fcitx5-openkey_*.deb
+fcitx5 -rd
+```
 
 Khi cài từ `.deb`, dùng package manager để gỡ:
 
@@ -211,6 +232,10 @@ sudo apt remove fcitx5-openkey
 
 Không cần chạy `scripts/uninstall.sh` cho bản `.deb`, trừ khi bạn từng cài thêm
 từ source bằng `scripts/install.sh` hoặc `cmake --install`.
+
+### Đóng gói .deb / .rpm
+
+Xem hướng dẫn đóng gói ở [PACKAGING.md](PACKAGING.md).
 
 ## Bật OpenKey trong Fcitx5
 
@@ -230,20 +255,25 @@ Nếu chưa thấy `OpenKey`:
 ## File cấu hình quan trọng
 
 - `~/.config/fcitx5/conf/openkey.conf`: cấu hình chính
+- `~/.config/fcitx5/conf/openkey-macro-table.conf`: danh sách macro / gõ tắt
 - `~/.config/fcitx5/conf/openkey-appmodes-x11.conf`: mode theo ứng dụng trên X11
 - `~/.config/fcitx5/conf/openkey-appmodes-wayland.conf`: mode theo ứng dụng trên Wayland
 
-Nếu bật macro, file macro được lấy theo đường dẫn bạn set trong cấu hình OpenKey.
+Macro được chỉnh qua mục cấu hình OpenKey trong `fcitx5-configtool`.
 
-## NonPreedit server và uinput
+## Non Preedit server và uinput
 
-`openkey-nonpreedit-server` là helper nền dùng cho mode `NonPreedit`. Addon tự spawn helper theo đường dẫn đã được CMake nhúng vào lúc build, mặc định là:
+`openkey-nonpreedit-server` là helper nền dùng cho mode `Non Preedit`. Addon
+tự spawn helper theo đường dẫn đã được CMake nhúng vào lúc build, mặc định là:
 
 ```text
 ${CMAKE_INSTALL_FULL_LIBEXECDIR}/openkey-nonpreedit-server
 ```
 
-Helper mở `/dev/uinput`, tạo virtual keyboard, đăng ký các key chuẩn `1..255` để tránh GNOME/Mutter thu hẹp global keymap, rồi chỉ phát `BackSpace` theo transaction mà addon gửi qua Unix socket.
+Helper mở `/dev/uinput`, tạo virtual keyboard, đăng ký các key chuẩn `1..255`
+để tránh GNOME/Mutter thu hẹp global keymap, rồi chỉ phát `BackSpace` theo
+transaction mà addon gửi qua Unix socket. Sau khi helper báo `DONE`, addon mới
+commit phần chữ đã chuyển đổi vào ứng dụng.
 
 Mặc định socket là:
 
@@ -266,9 +296,18 @@ Linux. Việc này là best-effort: nếu tiến trình không có quyền `CAP_
 hoặc root thì kernel sẽ từ chối và helper vẫn chạy với priority hiện tại. Đặt
 `OPENKEY_NONPREEDIT_SERVER_PRIORITY=0` để tắt hành vi này.
 
-Script cài đặt và gói `.deb` sẽ cố cấp capability này bằng `setcap
-cap_sys_nice+ep /usr/libexec/openkey-nonpreedit-server`. Có thể kiểm tra bằng
-`getcap /usr/libexec/openkey-nonpreedit-server`.
+Script cài đặt và các gói `.deb` được build kèm maintainer script trong
+`packaging/debian/` sẽ cố cấp capability này bằng:
+
+```bash
+setcap cap_sys_nice+ep /usr/libexec/openkey-nonpreedit-server
+```
+
+Có thể kiểm tra bằng:
+
+```bash
+getcap /usr/libexec/openkey-nonpreedit-server
+```
 
 Khi `fcitx5` tắt bình thường, addon sẽ gửi `SIGTERM` và reap helper. Trên Linux, helper child cũng được gắn parent-death signal, nên nếu `fcitx5` thoát bất ngờ thì helper cũng nhận `SIGTERM`.
 
@@ -334,7 +373,7 @@ Cách xử lý:
 
 - thử đổi mode bằng `Alt+Space`
 - với GNOME Wayland, cân nhắc cài extension bridge
-- kiểm tra `/dev/uinput` và quyền user nếu đang dùng `NonPreedit`
+- kiểm tra `/dev/uinput` và quyền user nếu đang dùng `Non Preedit`
 - restart `fcitx5`
 
 ### 5. Không gõ được trong một số ô nhập liệu web
@@ -364,7 +403,7 @@ Lưu ý:
 
 Nên thử:
 
-- đổi mode compose bằng `Alt+Space`
+- đổi mode gõ bằng `Alt+Space`
 - đóng app rồi mở lại
 - nếu đang GNOME Wayland, cài bridge extension
 
@@ -386,7 +425,8 @@ Nếu distro không tự nạp module này lúc boot, bạn cần tự cấu hì
 
 ### 7. `/dev/uinput: permission denied`
 
-Đây là lỗi rất hay gặp khi `NonPreedit` cần helper bơm `BackSpace` qua `uinput`.
+Đây là lỗi rất hay gặp khi `Non Preedit` cần helper bơm `BackSpace` qua
+`uinput`.
 
 Cách xử lý:
 
@@ -396,7 +436,8 @@ Cách xử lý:
 
 Script `./scripts/install.sh` đã cố gắng làm sẵn phần này trên Debian/Ubuntu.
 
-Nếu helper không mở được `/dev/uinput`, mode tự động sẽ dùng `preedit`; trong bản debug có thể thấy log kiểu `uinput backspace failed`.
+Nếu helper không mở được `/dev/uinput`, mode tự động sẽ dùng `Preedit`; trong
+bản debug có thể thấy log kiểu `uinput backspace failed`.
 
 ### 8. Gõ được lúc đầu, sau đó một số app không nhận đúng mode
 
@@ -484,7 +525,7 @@ Có thể chạy riêng test adapter:
 
 - `src/`: addon Linux cho `fcitx5`
 - `Sources/OpenKey/engine/`: core xử lý tiếng Việt
-- `tools/openkey-nonpreedit-server/`: helper Go cho mode `NonPreedit`
+- `tools/openkey-nonpreedit-server/`: helper Go cho mode `Non Preedit`
 - `extension/`: GNOME Shell bridge cho Wayland
 - `scripts/`: script cài, gỡ và sửa môi trường `fcitx5`
 
