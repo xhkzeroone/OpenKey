@@ -60,6 +60,10 @@ public:
                                         char breakChar,
                                         std::string &outRestoredWord) const;
 
+    // Convert a full raw ASCII Telex/VNI buffer into Vietnamese UTF-8.
+    // This feeds characters into OpenKey core sequentially.
+    std::string convertRawBuffer(const std::string &rawAscii) const;
+
     // Process a printable ASCII key (already layout-resolved).
     // currentWord is UTF-8, in Unicode precomposed form.
     OpenKeyProcessResult processAsciiKey(const std::string &currentWord,

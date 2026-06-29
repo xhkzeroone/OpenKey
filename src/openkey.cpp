@@ -621,6 +621,8 @@ static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 80000};
 static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 80000};
 static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{30000, 80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
+static constexpr uint64_t kRawBackspaceReleaseDelayUsec = 10000;
+static constexpr unsigned int kRawBackspaceExtraDelete = 0;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
@@ -1121,6 +1123,7 @@ struct BackspaceRewriteDeps {
     std::function<bool()> enableMacro;
     std::function<bool()> restoreIfWrongSpelling;
     std::function<bool()> enableBackspaceSnapshot;
+    std::function<bool()> enableRawBackspaceRewrite;
     std::function<bool()> remoteEnabled;
     std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
                        uint64_t, uint64_t)>
@@ -1336,7 +1339,17 @@ public:
             return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
         };
 
+        const auto adapterShared = deps_.adapter;
+        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        auto &rewriteState = state.rewriteState;
+
         if (event.isRelease()) {
+            if (isBackspace() && rewriteState.rawBackspaceAwaitingRelease) {
+                rewriteState.rawBackspaceAwaitingRelease = false;
+                event.filterAndAccept();
+                return scheduleRawBackspaceRewriteAfterRelease(
+                    ic, state, adapterShared, debug);
+            }
             return false;
         }
 
@@ -1344,12 +1357,19 @@ public:
             return false;
         }
 
-        const auto adapterShared = deps_.adapter;
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        auto &rewriteState = state.rewriteState;
-
         if (rewriteState.rewriteLock) {
             if (isBackspace()) {
+                rewriteState.seenBackspaces++;
+                if (debug) {
+                    FCITX_INFO() << "openkey: backspace-rewrite pass-backspace"
+                                 << " shown=" << rewriteState.shownText
+                                 << " raw=" << rewriteState.rawAsciiBuffer
+                                 << " expected="
+                                 << rewriteState.expectedBackspaces
+                                 << " seen=" << rewriteState.seenBackspaces
+                                 << " pendingRaw="
+                                 << rewriteState.pendingRawBackspaceRewrite;
+                }
                 return false;
             }
 
@@ -1369,20 +1389,27 @@ public:
             if (restoreBackspaceSnapshot(rewriteState)) {
                 return true;
             }
-            // Không clear hết — chỉ drop ký tự cuối để giữ context
-            if (!rewriteState.shownText.empty()) {
-                rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
-                if (!rewriteState.rawAsciiBuffer.empty()) {
-                    rewriteState.rawAsciiBuffer.pop_back();
+            if (rawBackspaceRewriteEnabled() &&
+                !rewriteState.shownText.empty() &&
+                !rewriteState.rawAsciiBuffer.empty()) {
+                if (rewriteState.rawBackspaceAwaitingRelease) {
+                    event.filterAndAccept();
+                    return true;
                 }
-                if (rewriteState.shownText.empty()) {
-                    rewriteState.rawAsciiBuffer.clear();
-                    rewriteState.hasRewrittenCurrentWord = false;
+                rewriteState.rawBackspaceAwaitingRelease = true;
+                if (debug) {
+                    FCITX_INFO() << "openkey: backspace-rewrite defer-raw-backspace"
+                                 << " program=" << state.program
+                                 << " shown=" << rewriteState.shownText
+                                 << " raw=" << rewriteState.rawAsciiBuffer
+                                 << " releaseDelay="
+                                 << kRawBackspaceReleaseDelayUsec;
                 }
-                rewriteState.allowTransientResetPreserve =
-                    !rewriteState.shownText.empty();
+                event.filterAndAccept();
+                return true;
             }
-            return false; // để app tự xóa ký tự trên màn hình
+            dropLastTrackedBackspace(rewriteState);
+            return false;
         }
 
         if (key.check(FcitxKey_Shift_L) || key.check(FcitxKey_Shift_R) ||
@@ -1443,6 +1470,34 @@ private:
     bool backspaceSnapshotEnabled() const {
         return !deps_.enableBackspaceSnapshot ||
                deps_.enableBackspaceSnapshot();
+    }
+
+    bool rawBackspaceRewriteEnabled() const {
+        return !deps_.enableRawBackspaceRewrite ||
+               deps_.enableRawBackspaceRewrite();
+    }
+
+    void dropLastTrackedBackspace(BackspaceRewriteState &rewriteState) const {
+        if (rewriteState.shownText.empty()) {
+            return;
+        }
+        rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
+        if (!rewriteState.rawAsciiBuffer.empty()) {
+            rewriteState.rawAsciiBuffer.pop_back();
+        }
+        if (rewriteState.shownText.empty()) {
+            rewriteState.rawAsciiBuffer.clear();
+            rewriteState.hasRewrittenCurrentWord = false;
+        }
+        rewriteState.allowTransientResetPreserve =
+            !rewriteState.shownText.empty();
+    }
+
+    void clearPendingCommit(BackspaceRewriteState &rewriteState) const {
+        rewriteState.pendingConvertedText.clear();
+        rewriteState.pendingShownTextAfterCommit.clear();
+        rewriteState.pendingRawAsciiAfterBackspace.clear();
+        rewriteState.pendingRawBackspaceRewrite = false;
     }
 
     void clearBackspaceSnapshot(
@@ -1595,8 +1650,9 @@ private:
         rewriteState.commitTimer.reset();
         rewriteState.lateBackspaceTimeoutTimer.reset();
         rewriteState.ackTimeoutTimer.reset();
-        rewriteState.pendingConvertedText.clear();
-        rewriteState.pendingShownTextAfterCommit.clear();
+        rewriteState.rawBackspaceReleaseTimer.reset();
+        rewriteState.rawBackspaceAwaitingRelease = false;
+        clearPendingCommit(rewriteState);
         rewriteState.remotePendingTxId = 0;
         rewriteState.remoteRewritePending = false;
         if (clearSnapshot) {
@@ -1607,12 +1663,21 @@ private:
     void finishPendingBackspaceCommit(fcitx::InputContext *ic,
                                       OpenKeyState &state) {
         auto &rewriteState = state.rewriteState;
-        const std::string commitText = std::move(rewriteState.pendingConvertedText);
-        const std::string shownAfter =
-            std::move(rewriteState.pendingShownTextAfterCommit);
+        std::string commitText;
+        std::string shownAfter;
+        if (rewriteState.pendingRawBackspaceRewrite) {
+            if (deps_.adapter) {
+                deps_.adapter->setCodeTable(state.codeTable);
+                commitText = deps_.adapter->convertRawBuffer(
+                    rewriteState.pendingRawAsciiAfterBackspace);
+            }
+            shownAfter = commitText;
+        } else {
+            commitText = std::move(rewriteState.pendingConvertedText);
+            shownAfter = std::move(rewriteState.pendingShownTextAfterCommit);
+        }
         rewriteState.commitTimer.reset();
-        rewriteState.pendingConvertedText.clear();
-        rewriteState.pendingShownTextAfterCommit.clear();
+        clearPendingCommit(rewriteState);
 
         if (!commitText.empty()) {
             ic->commitString(commitText);
@@ -1756,6 +1821,7 @@ private:
             rewriteState.waitingBackspaceAck = false;
             rewriteState.expectedBackspaces = static_cast<int>(deleteCount);
             rewriteState.seenBackspaces = 0;
+            clearPendingCommit(rewriteState);
             rewriteState.pendingConvertedText = commitText;
             rewriteState.pendingShownTextAfterCommit = newWord;
             rewriteState.hasRewrittenCurrentWord =
@@ -1770,11 +1836,153 @@ private:
                 return true;
             }
             rewriteState.rewriteLock = false;
-            rewriteState.pendingConvertedText.clear();
-            rewriteState.pendingShownTextAfterCommit.clear();
+            clearPendingCommit(rewriteState);
         }
 
         clearComposeState(rewriteState, "default");
+        return false;
+    }
+
+    bool scheduleRawBackspaceRewriteAfterRelease(
+        fcitx::InputContext *ic, OpenKeyState &state,
+        std::shared_ptr<OpenKeyAdapter> adapterShared, bool debug) {
+        auto &rewriteState = state.rewriteState;
+        rewriteState.rawBackspaceReleaseTimer.reset();
+
+        if (!deps_.instance || kRawBackspaceReleaseDelayUsec == 0) {
+            return scheduleRawBackspaceRewrite(ic, state, adapterShared, debug);
+        }
+
+        const auto icRef = ic->watch();
+        const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+        const uint64_t deadline =
+            fcitx::now(CLOCK_MONOTONIC) + kRawBackspaceReleaseDelayUsec;
+
+        rewriteState.rawBackspaceReleaseTimer =
+            deps_.instance->eventLoop().addTimeEvent(
+                CLOCK_MONOTONIC, deadline, 0,
+                [this, icRef, lifetimeWeak](fcitx::EventSourceTime *,
+                                            uint64_t) {
+                    if (lifetimeWeak.expired()) {
+                        return false;
+                    }
+
+                    auto *ic2 = icRef.get();
+                    if (!ic2) {
+                        return false;
+                    }
+
+                    auto *st = stateFor(ic2);
+                    if (!st) {
+                        return false;
+                    }
+
+                    auto _timer =
+                        std::move(st->rewriteState.rawBackspaceReleaseTimer);
+                    const bool debug =
+                        deps_.debugEnabled ? deps_.debugEnabled() : false;
+                    scheduleRawBackspaceRewrite(ic2, *st, deps_.adapter, debug);
+                    return false;
+                });
+
+        if (!rewriteState.rawBackspaceReleaseTimer) {
+            return scheduleRawBackspaceRewrite(ic, state, adapterShared, debug);
+        }
+
+        rewriteState.rawBackspaceReleaseTimer->setOneShot();
+        if (debug) {
+            FCITX_INFO() << "openkey: backspace-rewrite schedule-after-release"
+                         << " program=" << state.program
+                         << " delay=" << kRawBackspaceReleaseDelayUsec
+                         << " shown=" << rewriteState.shownText
+                         << " raw=" << rewriteState.rawAsciiBuffer;
+        }
+        return true;
+    }
+
+    bool scheduleRawBackspaceRewrite(fcitx::InputContext *ic,
+                                     OpenKeyState &state,
+                                     std::shared_ptr<OpenKeyAdapter> adapterShared,
+                                     bool debug) {
+        auto &rewriteState = state.rewriteState;
+        if (!adapterShared || rewriteState.shownText.empty() ||
+            rewriteState.rawAsciiBuffer.empty() ||
+            !fcitx::utf8::validate(rewriteState.shownText)) {
+            return false;
+        }
+
+        const std::string oldRaw = rewriteState.rawAsciiBuffer;
+        const RewriteTiming timing = backspaceRewriteTimingFor(ic, state.program);
+        unsigned int deleteCount = utf8CharCount(rewriteState.shownText);
+        if (deleteCount == 0) {
+            return false;
+        }
+        // This path replaces the whole shown word after a physical Backspace.
+        // It is scheduled after key release so the synthetic Backspaces do not
+        // overlap the physical key's down/repeat state.
+        deleteCount += kRawBackspaceExtraDelete;
+
+        rewriteState.rawAsciiBuffer.pop_back();
+        const std::string rawAfterBackspace = rewriteState.rawAsciiBuffer;
+
+        if (debug) {
+            FCITX_INFO() << "openkey: backspace-rewrite program=" << state.program
+                         << " reason=raw-backspace"
+                         << " from=" << rewriteState.shownText
+                         << " shownLen=" << utf8CharCount(rewriteState.shownText)
+                         << " rawAfter=" << rawAfterBackspace
+                         << " delete=" << deleteCount
+                         << " inter=" << timing.interKeyUsec
+                         << " delay=" << timing.commitDelayUsec
+                         << " rawBackspaceExtraDelete="
+                         << kRawBackspaceExtraDelete
+                         << " rewritePending=" << rewriteState.queuedKeys.size();
+        }
+
+        if (deps_.remoteEnabled && deps_.remoteEnabled() &&
+            deps_.remoteSchedule) {
+            if (debug) {
+                FCITX_INFO() << "openkey: backspace-rewrite schedule-plan"
+                             << " reason=raw-backspace"
+                             << " delete=" << deleteCount
+                             << " inter=" << timing.interKeyUsec
+                             << " delay=" << timing.commitDelayUsec
+                             << " rawAfter=" << rawAfterBackspace;
+            }
+            rewriteState.rewriteLock = true;
+            rewriteState.waitingBackspaceAck = false;
+            rewriteState.expectedBackspaces = static_cast<int>(deleteCount);
+            rewriteState.seenBackspaces = 0;
+            clearPendingCommit(rewriteState);
+            // Rebuild only after the helper reports DONE, so commit happens
+            // after the UI has processed the planned Backspaces.
+            rewriteState.pendingRawAsciiAfterBackspace = rawAfterBackspace;
+            rewriteState.pendingRawBackspaceRewrite = true;
+            rewriteState.restoredFromBackspaceSnapshot = false;
+            rewriteState.allowBackspaceSnapshotResetPreserve = false;
+            rewriteState.allowTransientResetPreserve = !rawAfterBackspace.empty();
+            if (deps_.remoteSchedule(
+                    ic, state, deleteCount, timing.interKeyUsec,
+                    timing.commitDelayUsec)) {
+                rewriteState.remoteRewritePending = true;
+                return true;
+            }
+            if (debug) {
+                FCITX_INFO() << "openkey: backspace-rewrite schedule-plan-failed"
+                             << " reason=raw-backspace"
+                             << " delete=" << deleteCount
+                             << " rawAfter=" << rawAfterBackspace;
+            }
+            rewriteState.rewriteLock = false;
+            clearPendingCommit(rewriteState);
+        }
+
+        rewriteState.rawAsciiBuffer = oldRaw;
+        rewriteState.waitingBackspaceAck = false;
+        rewriteState.expectedBackspaces = 0;
+        rewriteState.seenBackspaces = 0;
+        rewriteState.remotePendingTxId = 0;
+        rewriteState.remoteRewritePending = false;
         return false;
     }
 
@@ -1782,6 +1990,7 @@ private:
         return state.rewriteLock || state.waitingBackspaceAck ||
                !state.pendingConvertedText.empty() ||
                !state.pendingShownTextAfterCommit.empty() ||
+               state.pendingRawBackspaceRewrite ||
                state.hasRemoteRewritePending();
     }
 
@@ -1866,7 +2075,6 @@ private:
                           std::shared_ptr<OpenKeyAdapter> adapterShared,
                           bool debug) {
         auto &rewriteState = state.rewriteState;
-        const RewriteTiming timing = backspaceRewriteTimingFor(ic, state.program);
         if (hasCtrlAltSuperMeta(queuedKey)) {
            clearComposeState(rewriteState, "ctrl-alt-super");
             return false;
@@ -1893,30 +2101,27 @@ private:
             if (restoreBackspaceSnapshot(rewriteState)) {
                 return false;
             }
-            if (rewriteState.shownText.empty()) {
+            if (rewriteState.shownText.empty() ||
+                rewriteState.rawAsciiBuffer.empty()) {
                 return false;
             }
-            if (!rewriteState.hasRewrittenCurrentWord) {
-                clearComposeState(rewriteState,
-                                  "backspace-empty-or-not-rewritten");
-                return false;
+            if (!rawBackspaceRewriteEnabled()) {
+                if (!rewriteState.hasRewrittenCurrentWord) {
+                    clearComposeState(rewriteState,
+                                      "backspace-empty-or-not-rewritten");
+                    return false;
+                }
+                const RewriteTiming timing =
+                    backspaceRewriteTimingFor(ic, state.program);
+                const auto method = deps_.backspaceInjector->sendBackspaces(
+                    ic, state.program, 1, debug, timing.interKeyUsec);
+                if (method != BackspaceInjector::Method::Uinput) {
+                    return false;
+                }
+                dropLastTrackedBackspace(rewriteState);
+                return true;
             }
-            const auto method = deps_.backspaceInjector->sendBackspaces(
-                ic, state.program, 1, debug, timing.interKeyUsec);
-            if (method != BackspaceInjector::Method::Uinput) {
-                return false;
-            }
-            if (!rewriteState.rawAsciiBuffer.empty()) {
-                rewriteState.rawAsciiBuffer.pop_back();
-            }
-            rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
-            if (rewriteState.shownText.empty()) {
-                rewriteState.rawAsciiBuffer.clear();
-                rewriteState.hasRewrittenCurrentWord = false;
-            }
-            rewriteState.allowTransientResetPreserve =
-                !rewriteState.shownText.empty();
-            return true;
+            return scheduleRawBackspaceRewrite(ic, state, adapterShared, debug);
         }
 
         const auto normalizedKey = queuedKey.normalize();
@@ -2035,6 +2240,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     };
     rewriteDeps.enableBackspaceSnapshot = [this]() {
         return config_.enableBackspaceSnapshot.value();
+    };
+    rewriteDeps.enableRawBackspaceRewrite = [this]() {
+        return config_.enableRawBackspaceRewrite.value();
     };
     rewriteDeps.remoteEnabled = [this]() {
         return remoteRewriteCoordinator_ && remoteRewriteCoordinator_->enabled();
@@ -2556,6 +2764,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     auto *state = stateFor(ic);
 
     if (event.isRelease()) {
+        if (state && state->mode == RuntimeMode::BackspaceRewrite &&
+            backspaceRewriteHandler_) {
+            backspaceRewriteHandler_->handleKey(ic, event, *state);
+        }
         return;
     }
 

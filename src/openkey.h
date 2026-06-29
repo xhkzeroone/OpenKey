@@ -56,8 +56,12 @@ struct BackspaceRewriteState {
     std::unique_ptr<fcitx::EventSourceTime> commitTimer;
     std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
     std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
+    std::unique_ptr<fcitx::EventSourceTime> rawBackspaceReleaseTimer;
     std::string pendingConvertedText;
     std::string pendingShownTextAfterCommit;
+    std::string pendingRawAsciiAfterBackspace;
+    bool pendingRawBackspaceRewrite = false;
+    bool rawBackspaceAwaitingRelease = false;
     uint64_t remoteSessionId = 0;
     uint64_t remoteNextTxId = 1;
     uint64_t remotePendingTxId = 0;
@@ -93,8 +97,12 @@ struct BackspaceRewriteState {
         commitTimer.reset();
         lateBackspaceTimeoutTimer.reset();
         ackTimeoutTimer.reset();
+        rawBackspaceReleaseTimer.reset();
         pendingConvertedText.clear();
         pendingShownTextAfterCommit.clear();
+        pendingRawAsciiAfterBackspace.clear();
+        pendingRawBackspaceRewrite = false;
+        rawBackspaceAwaitingRelease = false;
         remotePendingTxId = 0;
         remoteRewritePending = false;
         backspaceSnapshotShownText.clear();

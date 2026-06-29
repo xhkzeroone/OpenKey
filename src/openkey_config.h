@@ -67,6 +67,14 @@ FCITX_CONFIGURATION(
         "EnableBackspaceSnapshot",
         N_("Cho phép Backspace quay lại sửa từ vừa gõ"),
         true};
+    // Backspace behavior in Non Preedit mode:
+    // - enabled: delete the whole shown word and rebuild it from raw keys
+    // - disabled: let the app delete one shown character and trim state only
+    fcitx::Option<bool> enableRawBackspaceRewrite{
+        this,
+        "EnableRawBackspaceRewrite",
+        N_("Xóa để sửa (bật = \"nhánh\" -> \"nhanh\", không bật = \"nhánh\" -> \"nhán\")"),
+        false};
     fcitx::Option<bool> useModernOrthography{
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
     fcitx::Option<bool> literalWAtWordStart{
