@@ -1121,6 +1121,7 @@ struct BackspaceRewriteDeps {
     std::function<bool()> enableMacro;
     std::function<bool()> restoreIfWrongSpelling;
     std::function<bool()> enableBackspaceSnapshot;
+    std::function<bool()> rawBackspaceRewriteEnabled;
     std::function<bool()> remoteEnabled;
     std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
                        uint64_t, uint64_t)>
@@ -1331,22 +1332,31 @@ public:
                OpenKeyState &state) override {
         auto key = event.rawKey();
         auto normKey = event.key().normalize();
+        const auto adapterShared = deps_.adapter;
+        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
+        auto &rewriteState = state.rewriteState;
 
         auto isBackspace = [&]() {
             return key.check(FcitxKey_BackSpace) || normKey.check(FcitxKey_BackSpace);
         };
 
         if (event.isRelease()) {
+            if (isBackspace() && rewriteState.rawBackspaceAwaitingRelease) {
+                rewriteState.rawBackspaceAwaitingRelease = false;
+                if (!deps_.remoteEnabled || !deps_.remoteEnabled() || !deps_.remoteSchedule) {
+                    return false;
+                }
+                adapterShared->setCodeTable(state.codeTable);
+                const std::string converted = adapterShared->convertRawBuffer(rewriteState.rawAsciiBuffer);
+                applyWordDelta(ic, state, debug, converted, 0, "raw-backspace", false);
+                return false; // let the release go to the app
+            }
             return false;
         }
 
         if (hasCtrlAltSuperMeta(key)) {
             return false;
         }
-
-        const auto adapterShared = deps_.adapter;
-        const bool debug = deps_.debugEnabled ? deps_.debugEnabled() : false;
-        auto &rewriteState = state.rewriteState;
 
         if (rewriteState.rewriteLock) {
             if (isBackspace()) {
@@ -1369,7 +1379,21 @@ public:
             if (restoreBackspaceSnapshot(rewriteState)) {
                 return true;
             }
-            // Không clear hết — chỉ drop ký tự cuối để giữ context
+            
+            bool rawBackspaceRewrite = deps_.rawBackspaceRewriteEnabled && deps_.rawBackspaceRewriteEnabled();
+            if (rawBackspaceRewrite && !rewriteState.shownText.empty() && !rewriteState.rawAsciiBuffer.empty()) {
+                rewriteState.rawBackspaceAwaitingRelease = true;
+                rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
+                rewriteState.rawAsciiBuffer.pop_back();
+                if (rewriteState.shownText.empty()) {
+                    rewriteState.rawAsciiBuffer.clear();
+                    rewriteState.hasRewrittenCurrentWord = false;
+                }
+                rewriteState.allowTransientResetPreserve = !rewriteState.shownText.empty();
+                return false;
+            }
+
+            // Fallback for non-raw-backspace
             if (!rewriteState.shownText.empty()) {
                 rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
                 if (!rewriteState.rawAsciiBuffer.empty()) {
@@ -1480,29 +1504,6 @@ private:
             return;
         }
         if (rewriteState.shownText.empty()) {
-            if (rewriteState.canReseedFromBackspaceSnapshot &&
-                !rewriteState.backspaceSnapshotShownText.empty()) {
-                rewriteState.preserveBackspaceSnapshotAfterBoundaryBackspace =
-                    true;
-                if (deps_.debugEnabled && deps_.debugEnabled()) {
-                    FCITX_INFO() << "openkey: bs-snapshot remember-boundary"
-                                 << " mode=backspaceRewrite"
-                                 << " snapshotShown="
-                                 << rewriteState.backspaceSnapshotShownText
-                                 << " snapshotRaw="
-                                 << rewriteState.backspaceSnapshotRawAsciiBuffer;
-                }
-                return;
-            }
-            if (deps_.debugEnabled && deps_.debugEnabled()) {
-                FCITX_INFO() << "openkey: bs-snapshot remember-skip"
-                             << " mode=backspaceRewrite"
-                             << " reason=empty-shown"
-                             << " snapshotShown="
-                             << rewriteState.backspaceSnapshotShownText
-                             << " canReseed="
-                             << rewriteState.canReseedFromBackspaceSnapshot;
-            }
             clearBackspaceSnapshot(rewriteState);
             return;
         }
@@ -2036,6 +2037,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     rewriteDeps.enableBackspaceSnapshot = [this]() {
         return config_.enableBackspaceSnapshot.value();
     };
+    rewriteDeps.rawBackspaceRewriteEnabled = [this]() {
+        return config_.enableRawBackspaceRewrite.value();
+    };
     rewriteDeps.remoteEnabled = [this]() {
         return remoteRewriteCoordinator_ && remoteRewriteCoordinator_->enabled();
     };
@@ -2556,6 +2560,10 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     auto *state = stateFor(ic);
 
     if (event.isRelease()) {
+        if (state && state->mode == RuntimeMode::BackspaceRewrite &&
+            backspaceRewriteHandler_) {
+            backspaceRewriteHandler_->handleKey(ic, event, *state);
+        }
         return;
     }
 

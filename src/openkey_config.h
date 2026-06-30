@@ -67,6 +67,11 @@ FCITX_CONFIGURATION(
         "EnableBackspaceSnapshot",
         N_("Cho phép Backspace quay lại sửa từ vừa gõ"),
         true};
+    fcitx::Option<bool> enableRawBackspaceRewrite{
+        this,
+        "EnableRawBackspaceRewrite",
+        N_("Xóa để sửa (bật = \"nhánh\" -> \"nhanh\", không bật = \"nhánh\" -> \"nhán\")"),
+        true};
     fcitx::Option<bool> useModernOrthography{
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
     fcitx::Option<bool> literalWAtWordStart{

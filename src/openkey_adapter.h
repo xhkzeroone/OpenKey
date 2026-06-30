@@ -62,6 +62,8 @@ public:
 
     // Process a printable ASCII key (already layout-resolved).
     // currentWord is UTF-8, in Unicode precomposed form.
+    std::string convertRawBuffer(const std::string &rawAscii) const;
+
     OpenKeyProcessResult processAsciiKey(const std::string &currentWord,
                                          char asciiChar) const;
 
