@@ -70,7 +70,7 @@ FCITX_CONFIGURATION(
     fcitx::Option<bool> enableRawBackspaceRewrite{
         this,
         "EnableRawBackspaceRewrite",
-        N_("Xóa để sửa (bật = \"nhánh\" -> \"nhanh\", không bật = \"nhánh\" -> \"nhán\")"),
+        N_("Bật xoá nhanh"),
         true};
     fcitx::Option<bool> useModernOrthography{
         this, "UseModernOrthography", N_("Đặt dấu oà, uý (thay vì òa, úy)"), true};
