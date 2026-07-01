@@ -615,12 +615,12 @@ struct RewriteTiming {
     uint64_t commitDelayUsec = 60000;
 };
 
-static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{10000, 30000};
-static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{20000, 50000};
-static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{30000, 80000};
-static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
+static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{1000, 30000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{1000, 30000};
+static constexpr RewriteTiming kBackspaceRewriteX11Timing{1000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{1000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{1000, 80000};
+static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 1000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
     (void)ic;
