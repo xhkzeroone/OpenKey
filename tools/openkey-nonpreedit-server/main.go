@@ -66,6 +66,12 @@ type planCommand struct {
 	commitDelay time.Duration
 }
 
+type sessionCommand struct {
+	plan   *planCommand
+	cancel bool
+	txID   uint64
+}
+
 const (
 	evSyn        = 0x00
 	evKey        = 0x01
@@ -213,16 +219,13 @@ func ioctlPtr(fd int, req uintptr, ptr unsafe.Pointer) error {
 	return nil
 }
 
-type sessionCommand struct {
-	plan *planCommand
-}
-
 type sessionRunner struct {
-	out    chan<- string
-	cmds   chan sessionCommand
-	wg     sync.WaitGroup
-	done   chan struct{}
-	uinput *uinputDevice
+	out         chan<- string
+	cmds        chan sessionCommand
+	wg          sync.WaitGroup
+	done        chan struct{}
+	uinput      *uinputDevice
+	currentTxID uint64
 }
 
 func newSessionRunner(out chan<- string, uinput *uinputDevice) *sessionRunner {
@@ -240,23 +243,30 @@ func (r *sessionRunner) loop() {
 	defer close(r.done)
 	var cancel context.CancelFunc
 	for cmd := range r.cmds {
-		if cmd.plan == nil {
+		if cmd.plan != nil {
+			if cancel != nil {
+				cancel()
+			}
+			ctx, nextCancel := context.WithCancel(context.Background())
+			cancel = nextCancel
+			r.currentTxID = cmd.plan.txID
+			plan := *cmd.plan
+			logEvent("start plan session=%d tx=%d backspaces=%d inter=%s commit_delay=%s",
+				plan.sessionID, plan.txID, plan.backspaces, plan.interKey,
+				plan.commitDelay)
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				runPlan(ctx, r.out, plan, r.uinput)
+			}()
 			continue
 		}
-		if cancel != nil {
-			cancel()
+		if cmd.cancel {
+			if cancel != nil && r.currentTxID == cmd.txID {
+				cancel()
+				r.currentTxID = 0
+			}
 		}
-		ctx, nextCancel := context.WithCancel(context.Background())
-		cancel = nextCancel
-		plan := *cmd.plan
-		logEvent("start plan session=%d tx=%d backspaces=%d inter=%s commit_delay=%s",
-			plan.sessionID, plan.txID, plan.backspaces, plan.interKey,
-			plan.commitDelay)
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
-			runPlan(ctx, r.out, plan, r.uinput)
-		}()
 	}
 	if cancel != nil {
 		cancel()
@@ -270,22 +280,35 @@ func (r *sessionRunner) stop() {
 }
 
 func runPlan(ctx context.Context, out chan<- string, plan planCommand, uinput *uinputDevice) {
-	for i := 0; i < plan.backspaces; i++ {
+	for i := 0; i < plan.backspaces+1; i++ {
 		if i > 0 && !waitOrCancel(ctx, plan.interKey) {
-			logEvent("cancelled before backspace session=%d tx=%d sent=%d/%d",
-				plan.sessionID, plan.txID, i, plan.backspaces)
+			if i <= plan.backspaces {
+				logEvent("cancelled before backspace session=%d tx=%d sent=%d/%d",
+					plan.sessionID, plan.txID, i, plan.backspaces+1)
+			} else {
+				logEvent("cancelled before sentinel session=%d tx=%d", plan.sessionID, plan.txID)
+			}
 			return
 		}
-		logEvent("inject backspace session=%d tx=%d index=%d/%d",
-			plan.sessionID, plan.txID, i+1, plan.backspaces)
+		if i == plan.backspaces {
+			logEvent("inject sentinel session=%d tx=%d index=%d/%d",
+				plan.sessionID, plan.txID, i+1, plan.backspaces+1)
+		} else {
+			logEvent("inject backspace session=%d tx=%d index=%d/%d",
+				plan.sessionID, plan.txID, i+1, plan.backspaces+1)
+		}
 		if err := uinput.backspace(); err != nil {
 			logEvent("uinput backspace failed session=%d tx=%d index=%d/%d err=%v",
-				plan.sessionID, plan.txID, i+1, plan.backspaces, err)
+				plan.sessionID, plan.txID, i+1, plan.backspaces+1, err)
 			return
 		}
 		if ctx.Err() != nil {
-			logEvent("cancelled after backspace session=%d tx=%d index=%d/%d",
-				plan.sessionID, plan.txID, i+1, plan.backspaces)
+			if i <= plan.backspaces {
+				logEvent("cancelled after backspace session=%d tx=%d index=%d/%d",
+					plan.sessionID, plan.txID, i+1, plan.backspaces+1)
+			} else {
+				logEvent("cancelled after sentinel session=%d tx=%d", plan.sessionID, plan.txID)
+			}
 			return
 		}
 	}
@@ -435,7 +458,22 @@ func (s *connectionState) handleLine(line string) error {
 			},
 		}
 		return nil
-
+	case "CANCELDONE":
+		if len(parts) != 3 {
+			return fmt.Errorf("CANCELDONE expects 3 fields, got %d", len(parts))
+		}
+		sessionID, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		txID, err := strconv.ParseUint(parts[2], 10, 64)
+		if err != nil {
+			return err
+		}
+		logEvent("canceldone session=%d tx=%d", sessionID, txID)
+		runner := s.session(sessionID)
+		runner.cmds <- sessionCommand{cancel: true, txID: txID}
+		return nil
 	}
 
 	return fmt.Errorf("unknown opcode %q", parts[0])
