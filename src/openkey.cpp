@@ -2486,10 +2486,10 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
 
   // Lấy thời gian hiện tại để kiểm tra khoảng cách từ lần gõ phím cuối
   uint64_t nowTime = fcitx::now(CLOCK_MONOTONIC);
-  // Nếu đã hơn 2 giây kể từ lần nhấn phím cuối cùng, coi như đây thực sự là bắt
-  // đầu gõ "từ đầu tiên". Nếu dưới 2 giây, có khả năng là ứng dụng đang tự động
+  // Nếu đã hơn 1 giây kể từ lần nhấn phím cuối cùng, coi như đây thực sự là bắt
+  // đầu gõ "từ đầu tiên". Nếu dưới 1 giây, có khả năng là ứng dụng đang tự động
   // focus lại ngầm ở giữa một từ đang gõ dở, nên giữ nguyên trạng thái cũ.
-  if (nowTime - lastKeyTime_ > 2000000) { // 2 seconds
+  if (nowTime - lastKeyTime_ > 1000000) { // 1 seconds
     // Mặc định là false
     state->x11FirstWordPreedit = false;
     // Kiểm tra ưu tiên theo ý muốn: Chỉ áp dụng trên X11 và nếu là Trình duyệt
