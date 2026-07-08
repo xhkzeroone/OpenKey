@@ -465,6 +465,32 @@ void startNewSession() {
     _longWordHelper.clear();
 }
 
+void vSetCurrentWord(const Uint32 *word, const Uint8 &len) {
+    startNewSession();
+    _specialChar.clear();
+    _typingStatesData.clear();
+    _typingStates.clear();
+    _longWordHelper.clear();
+    _spaceCount = 0;
+    _upperCaseStatus = 0;
+    _willTempOffEngine = false;
+
+    if (!word || len == 0) {
+        return;
+    }
+
+    for (Uint8 i = 0; i < len && i < MAX_BUFF; i++) {
+        TypingWord[i] = word[i];
+        KeyStates[i] = word[i];
+    }
+    _index = (len < MAX_BUFF) ? len : (Uint8)MAX_BUFF;
+    _stateIndex = _index;
+
+    if (vCheckSpelling) {
+        checkSpelling();
+    }
+}
+
 void checkCorrectVowel(vector<vector<Uint16>>& charset, int& i, int& k, const Uint16& markKey) {
     //ignore "qu" case
     if (_index >= 2 && CHR(_index-1) == KEY_U && CHR(_index-2) == KEY_Q) {

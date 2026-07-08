@@ -1,0 +1,8 @@
+{
+  "uuid": "openkey-bridge@openkey.dev",
+  "name": "OpenKey Focus Bridge",
+  "description": "Expose focused app name over D-Bus for OpenKey.",
+  "version": 1,
+  "shell-version": ["42", "43", "44"]
+}
+

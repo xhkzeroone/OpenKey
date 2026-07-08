@@ -1,0 +1,198 @@
+name: Package Linux
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read project version
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -nE 's/^project\(fcitx5-openkey VERSION ([^ ]+) .*/\1/p' CMakeLists.txt)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read project version from CMakeLists.txt" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  deb:
+    runs-on: ubuntu-24.04
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - container_image: ubuntu:22.04
+            package_suffix: ubuntu22
+            artifact_name: fcitx5-openkey-deb-ubuntu22
+          - container_image: ubuntu:24.04
+            package_suffix: ubuntu24
+            artifact_name: fcitx5-openkey-deb-ubuntu24
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .deb in Ubuntu container
+        run: |
+          rm -rf build-pkg pkgroot dist
+          mkdir -p dist
+          docker run --rm \
+            -e VERSION="$VERSION" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e PACKAGE_SUFFIX="${{ matrix.package_suffix }}" \
+            -v "$PWD:/work" \
+            -w /work \
+            "${{ matrix.container_image }}" \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y \
+                build-essential \
+                cmake \
+                pkg-config \
+                extra-cmake-modules \
+                gettext \
+                golang-go \
+                ruby \
+                ruby-dev \
+                fcitx5 \
+                fcitx5-config-qt \
+                fcitx5-frontend-gtk3 \
+                fcitx5-frontend-qt5 \
+                libfcitx5core-dev \
+                libfcitx5config-dev \
+                libfcitx5utils-dev
+              gem install --no-document fpm
+
+              rm -rf build-pkg pkgroot
+              cmake -S . -B build-pkg \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr
+              cmake --build build-pkg -j"$(nproc)"
+              DESTDIR="$PWD/pkgroot" cmake --install build-pkg --strip
+
+              fpm -s dir -t deb \
+                -n fcitx5-openkey \
+                -v "$VERSION" \
+                --architecture amd64 \
+                --description "OpenKey Vietnamese input method for Fcitx5" \
+                --url "https://github.com/open-key/OpenKey" \
+                --license GPL-3.0 \
+                --depends fcitx5 \
+                --depends fcitx5-frontend-gtk3 \
+                --depends fcitx5-frontend-qt5 \
+                -C pkgroot \
+                -p "dist/fcitx5-openkey_${VERSION}_${PACKAGE_SUFFIX}_amd64.deb" \
+                .
+              dpkg-deb -c "dist/fcitx5-openkey_${VERSION}_${PACKAGE_SUFFIX}_amd64.deb"
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*_${{ matrix.package_suffix }}_amd64.deb
+          if-no-files-found: error
+
+  rpm:
+    runs-on: ubuntu-24.04
+    needs: version
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .rpm in Ubuntu container
+        run: |
+          docker run --rm \
+            -e VERSION="$VERSION" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -v "$PWD:/work" \
+            -w /work \
+            ubuntu:24.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y \
+                build-essential \
+                cmake \
+                pkg-config \
+                extra-cmake-modules \
+                gettext \
+                golang-go \
+                rpm \
+                ruby \
+                ruby-dev \
+                fcitx5 \
+                fcitx5-config-qt \
+                fcitx5-frontend-gtk3 \
+                fcitx5-frontend-qt5 \
+                libfcitx5core-dev \
+                libfcitx5config-dev \
+                libfcitx5utils-dev
+              gem install --no-document fpm
+
+              rm -rf build-pkg pkgroot dist
+              cmake -S . -B build-pkg \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr
+              cmake --build build-pkg -j"$(nproc)"
+              DESTDIR="$PWD/pkgroot" cmake --install build-pkg --strip
+              mkdir -p dist
+
+              fpm -s dir -t rpm \
+                -n fcitx5-openkey \
+                -v "$VERSION" \
+                --architecture x86_64 \
+                --description "OpenKey Vietnamese input method for Fcitx5" \
+                --url "https://github.com/open-key/OpenKey" \
+                --license GPL-3.0 \
+                --depends fcitx5 \
+                -C pkgroot \
+                -p "dist/fcitx5-openkey-${VERSION}.x86_64.rpm" \
+                .
+              rpm -qpl "dist/fcitx5-openkey-${VERSION}.x86_64.rpm"
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fcitx5-openkey-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-24.04
+    needs:
+      - deb
+      - rpm
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/0') || startsWith(github.ref, 'refs/tags/1') || startsWith(github.ref, 'refs/tags/2') || startsWith(github.ref, 'refs/tags/3') || startsWith(github.ref, 'refs/tags/4') || startsWith(github.ref, 'refs/tags/5') || startsWith(github.ref, 'refs/tags/6') || startsWith(github.ref, 'refs/tags/7') || startsWith(github.ref, 'refs/tags/8') || startsWith(github.ref, 'refs/tags/9')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Upload packages to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --notes "Linux packages for $tag"
+          fi
+          gh release upload "$tag" artifacts/**/* --clobber
