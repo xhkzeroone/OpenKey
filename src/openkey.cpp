@@ -684,12 +684,40 @@ static bool isRunningOnX11() {
   return false;
 }
 
-static bool isFirefoxLikeProgram(const std::string &program) {
-  if (program.empty()) {
+static std::string getCombinedProgramInfo(const OpenKeyState &state) {
+  return normalizedProgramName(state.program) + " " +
+         asciiLower(state.windowTitle);
+}
+
+static bool isBrowserLikeProgram(const OpenKeyState &state);
+
+static bool isMetaAppOrWeb(const OpenKeyState &state) {
+  if (state.program.empty() && state.windowTitle.empty()) {
+    return true;
+  }
+  // Nếu là trình duyệt nhưng không có windowTitle (do tắt extension),
+  // ta không thể biết web gì, nên mặc định trả về true để dùng delay an toàn (40ms/30ms)
+  if (state.windowTitle.empty() && isBrowserLikeProgram(state)) {
+    return true;
+  }
+  const std::string base = asciiLower(getCombinedProgramInfo(state));
+  static const std::vector<std::string> kMetaPatterns = {
+      "messenger", "facebook", "instagram", "whatsapp", "threads",
+  };
+  for (const auto &pattern : kMetaPatterns) {
+    if (base.find(pattern) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool isFirefoxLikeProgram(const OpenKeyState &state) {
+  if (state.program.empty() && state.windowTitle.empty()) {
     return false;
   }
 
-  const std::string base = normalizedProgramName(program);
+  const std::string base = asciiLower(getCombinedProgramInfo(state));
   static const std::vector<std::string> kFirefoxPatterns = {
       "firefox", "librewolf",   "waterfox", "floorp",
       "zen",     "tor-browser", "mullvad",  "icecat",
@@ -703,16 +731,16 @@ static bool isFirefoxLikeProgram(const std::string &program) {
   return false;
 }
 
-static bool needsTransientResetPreserve(const std::string &program) {
-  return isFirefoxLikeProgram(program);
+static bool needsTransientResetPreserve(const OpenKeyState &state) {
+  return isFirefoxLikeProgram(state);
 }
 
-static bool isBrowserLikeProgram(const std::string &program) {
-  if (program.empty()) {
+static bool isBrowserLikeProgram(const OpenKeyState &state) {
+  if (state.program.empty() && state.windowTitle.empty()) {
     return true; // Assume browser-like if program name is unknown.
   }
 
-  const std::string base = normalizedProgramName(program);
+  const std::string base = asciiLower(getCombinedProgramInfo(state));
   std::vector<std::string> kBrowserPatterns = {
       // Chromium
       "chrome",
@@ -752,9 +780,8 @@ static bool isBrowserLikeProgram(const std::string &program) {
       "dooble",
       "arc",
       "helium",
-      "mullvad"
-      "window:"
-      "messenger",
+      "mullvad",
+      "window:",
   };
 
   for (const auto &pattern : kBrowserPatterns) {
@@ -895,17 +922,17 @@ static bool trackedWordStillBeforeCursor(fcitx::InputContext *ic,
 }
 
 static RewriteTiming backspaceRewriteTimingFor(bool x11,
-                                               const std::string &program) {
+                                               const OpenKeyState &state) {
 
-  if (x11 && isFirefoxLikeProgram(program)) {
+  if (x11 && isFirefoxLikeProgram(state)) {
     return kBackspaceRewriteX11FirefoxFamilyTiming;
   }
 
-  if (!x11 && isFirefoxLikeProgram(program)) {
+  if (!x11 && isFirefoxLikeProgram(state)) {
     return kBackspaceRewriteWaylandFirefoxFamilyTiming;
   }
 
-  if (x11 && isBrowserLikeProgram(program)) {
+  if (x11 && isBrowserLikeProgram(state)) {
     return kBackspaceRewriteX11BrowserTiming;
   }
 
@@ -1126,11 +1153,8 @@ public:
     }
   }
 
-  // Returns GNOME Shell focused app id (usually "*.desktop"), or empty.
-  std::string focusedAppId() { return query().first; }
-
-  // Returns GNOME Shell focused app name, or empty.
-  std::string focusedAppName() { return query().second; }
+  // Returns GNOME Shell focused app id (usually "*.desktop") and window title.
+  std::pair<std::string, std::string> focusedAppInfo() { return query(); }
 
 private:
   std::pair<std::string, std::string> query() {
@@ -1422,8 +1446,15 @@ public:
                          << rewriteState.seenBackspaces;
           }
           if (deps_.remoteScheduleWait) {
-            deps_.remoteScheduleWait(state,
-                                     state.isX11Environment ? 40000 : 30000);
+            // Ứng dụng thuộc họ Meta (Messenger, Facebook, WhatsApp...): X11 =
+            // 40ms, Wayland = 30ms
+            if (isMetaAppOrWeb(state)) {
+              deps_.remoteScheduleWait(state,
+                                       state.isX11Environment ? 40000 : 30000);
+            } else {
+              deps_.remoteScheduleWait(state,
+                                       state.isX11Environment ? 20000 : 15000);
+            }
           }
           event.filterAndAccept();
           return true;
@@ -1437,7 +1468,7 @@ public:
     }
 
     if (isBackspace()) {
-      if (needsTransientResetPreserve(state.program) &&
+      if (needsTransientResetPreserve(state) &&
           !rewriteState.shownText.empty() &&
           !trackedWordStillBeforeCursor(ic, rewriteState.shownText, false)) {
         clearComposeState(rewriteState, "backspace-cursor-mismatch");
@@ -1760,7 +1791,8 @@ private:
     const std::string oldShown = rewriteState.shownText;
     const std::string rawAppend =
         compareWithRawAppend ? oldShown + asciiChar : oldShown;
-    const RewriteTiming timing = backspaceRewriteTimingFor(state.isX11Environment, state.program);
+    const RewriteTiming timing =
+        backspaceRewriteTimingFor(state.isX11Environment, state);
     const std::size_t prefixLen =
         commonPrefixBytesUTF8Boundary(rewriteState.shownText, newWord);
     unsigned int deleteCount =
@@ -1770,7 +1802,7 @@ private:
     const std::string expectedPrefixAfterDelete =
         rewriteState.shownText.substr(0, prefixLen);
     const bool browserAutocomplete =
-        deleteCount > 0 && isBrowserLikeProgram(state.program) &&
+        deleteCount > 0 && isBrowserLikeProgram(state) &&
         !rewriteState.hasRewrittenCurrentWord &&
         looksLikeBrowserAutocomplete(ic, rewriteState.shownText);
     if (browserAutocomplete) {
@@ -1874,7 +1906,7 @@ private:
       forwardKeyPressAndRelease(ic, boundaryKey);
       clearComposeState(rewriteState, "macro-boundary", false);
       rewriteState.allowBackspaceSnapshotResetPreserve =
-          needsTransientResetPreserve(state.program) && trigger == ' ';
+          needsTransientResetPreserve(state) && trigger == ' ';
     }
     return true;
   }
@@ -1914,7 +1946,7 @@ private:
       forwardKeyPressAndRelease(ic, boundaryKey);
       clearComposeState(rewriteState, "restore-boundary", false);
       rewriteState.allowBackspaceSnapshotResetPreserve =
-          needsTransientResetPreserve(state.program) && trigger == ' ';
+          needsTransientResetPreserve(state) && trigger == ' ';
     }
     return true;
   }
@@ -1924,7 +1956,8 @@ private:
                         std::shared_ptr<OpenKeyAdapter> adapterShared,
                         bool debug) {
     auto &rewriteState = state.rewriteState;
-    const RewriteTiming timing = backspaceRewriteTimingFor(state.isX11Environment, state.program);
+    const RewriteTiming timing =
+        backspaceRewriteTimingFor(state.isX11Environment, state);
     if (hasCtrlAltSuperMeta(queuedKey)) {
       clearComposeState(rewriteState, "ctrl-alt-super");
       return false;
@@ -1941,7 +1974,7 @@ private:
     }
 
     if (queuedKey.check(FcitxKey_BackSpace)) {
-      if (needsTransientResetPreserve(state.program) &&
+      if (needsTransientResetPreserve(state) &&
           !rewriteState.shownText.empty() &&
           !trackedWordStillBeforeCursor(ic, rewriteState.shownText, false)) {
         clearComposeState(rewriteState, "backspace-cursor-mismatch");
@@ -1996,7 +2029,7 @@ private:
         rememberBackspaceSnapshot(rewriteState);
         clearComposeState(rewriteState, "boundary", false);
         rewriteState.allowBackspaceSnapshotResetPreserve =
-            needsTransientResetPreserve(state.program) && c == ' ';
+            needsTransientResetPreserve(state) && c == ' ';
         return false;
       }
 
@@ -2012,7 +2045,7 @@ private:
         clearBackspaceSnapshot(rewriteState);
       }
 
-      if (needsTransientResetPreserve(state.program) &&
+      if (needsTransientResetPreserve(state) &&
           !rewriteState.shownText.empty() &&
           !trackedWordStillBeforeCursor(ic, rewriteState.shownText, false)) {
         clearComposeState(rewriteState, "ascii-cursor-mismatch");
@@ -2438,25 +2471,29 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
   state->manualMode = false;
   state->modeDecided = false;
   state->program = ic->program();
-  if (state->program.empty() && focusedAppBridge_) {
-    const std::string bridged = focusedAppBridge_->focusedAppId();
-    if (!bridged.empty()) {
-      state->program = bridged;
-      if (debugEnabled()) {
-        FCITX_INFO() << "openkey: bridge program=" << state->program;
-      }
+  state->windowTitle.clear();
+  if (focusedAppBridge_) {
+    const auto info = focusedAppBridge_->focusedAppInfo();
+    if (state->program.empty() && !info.first.empty()) {
+      state->program = info.first;
+    }
+    state->windowTitle = info.second;
+    if (debugEnabled()) {
+      FCITX_INFO() << "openkey: bridge program=" << state->program
+                   << " title=" << state->windowTitle;
     }
   }
 
   // Lấy thời gian hiện tại để kiểm tra khoảng cách từ lần gõ phím cuối
   uint64_t nowTime = fcitx::now(CLOCK_MONOTONIC);
-  // Nếu đã hơn 2 giây kể từ lần nhấn phím cuối cùng, coi như đây thực sự là bắt đầu gõ "từ đầu tiên".
-  // Nếu dưới 2 giây, có khả năng là ứng dụng đang tự động focus lại ngầm ở giữa một từ đang gõ dở, nên giữ nguyên trạng thái cũ.
+  // Nếu đã hơn 2 giây kể từ lần nhấn phím cuối cùng, coi như đây thực sự là bắt
+  // đầu gõ "từ đầu tiên". Nếu dưới 2 giây, có khả năng là ứng dụng đang tự động
+  // focus lại ngầm ở giữa một từ đang gõ dở, nên giữ nguyên trạng thái cũ.
   if (nowTime - lastKeyTime_ > 2000000) { // 2 seconds
     // Mặc định là false
     state->x11FirstWordPreedit = false;
     // Kiểm tra ưu tiên theo ý muốn: Chỉ áp dụng trên X11 và nếu là Trình duyệt
-    if (state->isX11Environment && isBrowserLikeProgram(state->program)) {
+    if (state->isX11Environment && isBrowserLikeProgram(*state)) {
       // Nếu là trình duyệt nhưng KHÔNG hỗ trợ SurroundingText thì mới bật cờ
       if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
         state->x11FirstWordPreedit = true;
@@ -2490,7 +2527,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
   const bool snapshotEnabled = config_.enableBackspaceSnapshot.value();
 
   const bool transientResetKeepRewrite =
-      needsTransientResetPreserve(state->program) &&
+      needsTransientResetPreserve(*state) &&
       state->mode == RuntimeMode::BackspaceRewrite &&
       !state->rewriteState.shownText.empty() &&
       !state->rewriteState.rawAsciiBuffer.empty() &&
@@ -2613,7 +2650,7 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s,
   }
 
   RuntimeMode mode;
-  if (isFirefoxLikeProgram(s.program)) {
+  if (isFirefoxLikeProgram(s)) {
     mode = RuntimeMode::Preedit;
   } else {
     mode = rewriteServerAvailable() ? RuntimeMode::BackspaceRewrite
@@ -2790,24 +2827,26 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
   // composing buffer in preedit mode.
   if (hasCtrlAltSuperMeta(key)) {
     RuntimeMode checkMode = state->mode;
-    // Fix kẹt chữ: Mặc dù mode hiện tại là BackspaceRewrite, nhưng nếu cờ x11FirstWordPreedit 
-    // đang bật thì bộ gõ thực chất đang chạy ngầm bằng Preedit. Ta phải báo cho hệ thống 
-    // biết nó là Preedit để dọn dẹp chữ gõ dở, nếu không chữ sẽ bị dính vĩnh viễn trên màn hình.
+    // Fix kẹt chữ: Mặc dù mode hiện tại là BackspaceRewrite, nhưng nếu cờ
+    // x11FirstWordPreedit đang bật thì bộ gõ thực chất đang chạy ngầm bằng
+    // Preedit. Ta phải báo cho hệ thống biết nó là Preedit để dọn dẹp chữ gõ
+    // dở, nếu không chữ sẽ bị dính vĩnh viễn trên màn hình.
     if (state->isX11Environment &&
         state->mode == RuntimeMode::BackspaceRewrite &&
         state->x11FirstWordPreedit) {
       checkMode = RuntimeMode::Preedit;
     }
-    
-    // Nếu đang có chữ gõ dở (!composing.empty()) mà người dùng bấm phím tắt (vd: Ctrl+C, Ctrl+S)
-    // thì xóa sạch chữ gõ dở đó đi (gọi reset).
+
+    // Nếu đang có chữ gõ dở (!composing.empty()) mà người dùng bấm phím tắt
+    // (vd: Ctrl+C, Ctrl+S) thì xóa sạch chữ gõ dở đó đi (gọi reset).
     if (state->modeDecided && checkMode == RuntimeMode::Preedit &&
         !state->composing.empty()) {
       preeditHandler_->reset(*state);
     }
-    
-    // Bấm phím tắt đồng nghĩa với việc người dùng đã ngắt quãng việc gõ từ hiện tại (break).
-    // Hủy cờ Preedit tạm thời để chữ tiếp theo sau khi bấm phím tắt sẽ gõ bằng BackspaceRewrite.
+
+    // Bấm phím tắt đồng nghĩa với việc người dùng đã ngắt quãng việc gõ từ hiện
+    // tại (break). Hủy cờ Preedit tạm thời để chữ tiếp theo sau khi bấm phím
+    // tắt sẽ gõ bằng BackspaceRewrite.
     if (state->x11FirstWordPreedit) {
       state->x11FirstWordPreedit = false;
     }
@@ -2842,22 +2881,26 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     break;
   }
 
-  // Kiểm tra xem sự kiện vừa rồi có phải là một khoảng nghỉ (break) để thoát khỏi Preedit hay không
+  // Kiểm tra xem sự kiện vừa rồi có phải là một khoảng nghỉ (break) để thoát
+  // khỏi Preedit hay không
   if (state->x11FirstWordPreedit && effectiveMode == RuntimeMode::Preedit) {
     bool isBreak = false;
     if (wasComposing && state->composing.empty()) {
-      // Nếu trước đó đang gõ chữ mà giờ trống trơn, ngoại trừ trường hợp bị người dùng chủ động xóa hết bằng Backspace/Escape.
+      // Nếu trước đó đang gõ chữ mà giờ trống trơn, ngoại trừ trường hợp bị
+      // người dùng chủ động xóa hết bằng Backspace/Escape.
       if (!key.check(FcitxKey_BackSpace) && !key.check(FcitxKey_Escape)) {
         isBreak = true;
       }
     } else if (!wasComposing && state->composing.empty()) {
-      // Nếu không phải đang gõ chữ, mọi thao tác ngoài modifier hay phím xóa đều coi là tạo ra khoảng nghỉ.
+      // Nếu không phải đang gõ chữ, mọi thao tác ngoài modifier hay phím xóa
+      // đều coi là tạo ra khoảng nghỉ.
       if (!key.isModifier() && !key.check(FcitxKey_BackSpace) &&
           !key.check(FcitxKey_Escape) && !key.check(FcitxKey_Delete)) {
         isBreak = true;
       }
     }
-    // Gỡ cờ first word và trở về lại với chế độ BackspaceRewrite cho các chữ tiếp theo.
+    // Gỡ cờ first word và trở về lại với chế độ BackspaceRewrite cho các chữ
+    // tiếp theo.
     if (isBreak) {
       state->x11FirstWordPreedit = false;
     }

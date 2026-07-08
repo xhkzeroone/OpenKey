@@ -68,15 +68,13 @@ class BridgeService {
     }
 
     _getFocusedApp() {
+        const win = global.display.get_focus_window?.() ?? null;
         let app = this._tracker.focus_app;
-        if (!app) {
-            const win = global.display.get_focus_window?.() ?? null;
-            if (win) {
-                app = this._tracker.get_window_app(win);
-            }
+        if (!app && win) {
+            app = this._tracker.get_window_app(win);
         }
         const appId = app?.get_id?.() ?? '';
-        const appName = app?.get_name?.() ?? '';
+        const appName = win?.get_title?.() ?? app?.get_name?.() ?? '';
         return [String(appId), String(appName)];
     }
 
