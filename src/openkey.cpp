@@ -197,6 +197,22 @@ public:
         std::to_string(commitDelayUsec) + "\n");
   }
 
+  bool scheduleWait(uint64_t sessionId, uint64_t txId, uint64_t delayUsec) {
+    std::lock_guard<std::mutex> lock(ioMutex_);
+    if (!ensureConnectedLocked(false)) {
+      return false;
+    }
+    if (debugEnabled_ && debugEnabled_()) {
+      std::string msg = "schedule WAIT session=" + std::to_string(sessionId) +
+                        " tx=" + std::to_string(txId) +
+                        " delay=" + std::to_string(delayUsec);
+      maybeLog(msg.c_str());
+    }
+    return sendLineLocked("WAIT " + std::to_string(sessionId) + " " +
+                          std::to_string(txId) + " " +
+                          std::to_string(delayUsec) + "\n");
+  }
+
   bool cancelDone(uint64_t sessionId, uint64_t txId) {
     std::lock_guard<std::mutex> lock(ioMutex_);
     if (!ensureConnectedLocked(false)) {
@@ -645,12 +661,14 @@ struct RewriteTiming {
   uint64_t commitDelayUsec = 60000;
 };
 
-static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{2000, 40000};
-static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{2000, 40000};
-static constexpr RewriteTiming kBackspaceRewriteX11Timing{2000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{2000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{2000, 80000};
-static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 2000;
+static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{1000, 40000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{
+    1000, 40000};
+static constexpr RewriteTiming kBackspaceRewriteX11Timing{1000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{1000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{1000,
+                                                                       80000};
+static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
 
 static bool isRunningOnX11(fcitx::InputContext *ic) {
   (void)ic;
@@ -696,64 +714,48 @@ static bool isBrowserLikeProgram(const std::string &program) {
   }
 
   const std::string base = normalizedProgramName(program);
-  static const std::vector<std::string> kBrowserPatterns = {
-      "chrome",        "chromium",
-      "edge",          "msedge",
-      "brave",         "vivaldi",
-      "opera",         "coccoc",
-      "yandex",        "firefox",
-      "librewolf",     "waterfox",
-      "floorp",        "zen",
-      "epiphany",      "falkon",
-      "midori",        "qutebrowser",
-      "palemoon",      "basilisk",
-      "nyxt",          "otter",
-      "dooble",        "messenger",
-      "helium",        "arc",
-      "mullvad",       "tor-browser",
-      "torbrowser",    "code",
-      "code-oss",      "vscode",
-      "codium",        "vscodium",
-      "vs-code",       "vs_code",
-      "vscoe",         "cursor",
-      "windsurf",      "antigravity",
-      "kiro",          "trae",
-      "opencode",      "open-code",
-      "claude-code",   "codex",
-      "codex-cli",     "gemini-cli",
-      "qwen-code",     "aider",
-      "devin",         "devin-desktop",
-      "zed",           "zed-editor",
-      "void",          "void-editor",
-      "pearai",        "nimbalyst",
-      "tabby",         "tabnine",
-      "continue",      "cline",
-      "roo-code",      "github-copilot",
-      "copilot",       "replit",
-      "idea",          "intellij",
-      "fleet",         "pycharm",
-      "webstorm",      "phpstorm",
-      "clion",         "goland",
-      "rubymine",      "rider",
-      "datagrip",      "android-studio",
-      "dataspell",     "rustrover",
-      "aqua",          "appcode",
-      "studio",        "eclipse",
-      "netbeans",      "qtcreator",
-      "qt-creator",    "kdevelop",
-      "gnome-builder", "builder",
-      "geany",         "codeblocks",
-      "code::blocks",  "sublime_text",
-      "sublime-text",  "sublime",
-      "atom",          "lapce",
-      "lite-xl",       "lite_xl",
-      "nova",          "kate",
-      "gedit",         "gnome-text-editor",
-      "text-editor",   "texteditor",
-      "emacs",         "vim",
-      "nvim",          "neovim",
-      "helix",         "hx",
-      "window:",
+  std::vector<std::string> kBrowserPatterns = {
+      // Chromium
+      "chrome",
+      "google-chrome",
+      "chromium",
+      "chromium-browser",
+      "edge",
+      "msedge",
+      "brave",
+      "vivaldi",
+      "opera",
+      "opera-beta",
+      "opera-developer",
+      "coccoc",
+      "yandex",
+
+      // Firefox family
+      "firefox",
+      "librewolf",
+      "waterfox",
+      "floorp",
+      "zen",
+      "tor-browser",
+      "torbrowser",
+
+      // WebKit / Qt
+      "epiphany",
+      "falkon",
+      "midori",
+      "qutebrowser",
+
+      // Other browsers
+      "palemoon",
+      "basilisk",
+      "nyxt",
+      "otter",
+      "dooble",
+      "arc",
+      "helium",
+      "mullvad"
+      "window:"
+      "messenger",
   };
 
   for (const auto &pattern : kBrowserPatterns) {
@@ -1174,6 +1176,7 @@ struct BackspaceRewriteDeps {
   std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
                      uint64_t, uint64_t)>
       remoteSchedule;
+  std::function<bool(OpenKeyState &, uint64_t)> remoteScheduleWait;
   std::function<bool(uint64_t, uint64_t)> remoteCancelDone;
 };
 
@@ -1416,7 +1419,14 @@ public:
             return false;
           }
           rewriteState.waitingBackspaceAck = false;
-
+          if (debug) {
+            FCITX_INFO() << "openkey: ack full, backspaces="
+                         << rewriteState.seenBackspaces;
+          }
+          if (deps_.remoteScheduleWait) {
+            deps_.remoteScheduleWait(state,
+                                     state.isX11Environment ? 40000 : 30000);
+          }
           event.filterAndAccept();
           return true;
         }
@@ -1644,8 +1654,6 @@ private:
     rewriteState.lateBackspaceBudget = 0;
     rewriteState.queuedKeys.clear();
     rewriteState.commitTimer.reset();
-    rewriteState.lateBackspaceTimeoutTimer.reset();
-    rewriteState.ackTimeoutTimer.reset();
     rewriteState.pendingConvertedText.clear();
     rewriteState.pendingShownTextAfterCommit.clear();
 
@@ -1674,7 +1682,6 @@ private:
     rewriteState.waitingBackspaceAck = false;
     rewriteState.expectedBackspaces = 0;
     rewriteState.seenBackspaces = 0;
-    rewriteState.ackTimeoutTimer.reset();
     rewriteState.remotePendingTxId = 0;
     rewriteState.remoteRewritePending = false;
     if (rewriteState.shownText.empty()) {
@@ -2096,6 +2103,15 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
         return scheduleRemoteRewrite(ic, state, deleteCount, interBackspaceUsec,
                                      commitDelayUsec);
       };
+  rewriteDeps.remoteScheduleWait = [this](OpenKeyState &state,
+                                          uint64_t delayUsec) {
+    if (!remoteRewriteCoordinator_) {
+      return false;
+    }
+    return remoteRewriteCoordinator_->scheduleWait(
+        state.rewriteState.remoteSessionId,
+        state.rewriteState.remotePendingTxId, delayUsec);
+  };
   rewriteDeps.remoteCancelDone = [this](uint64_t sessionId, uint64_t txId) {
     return remoteRewriteCoordinator_ &&
            remoteRewriteCoordinator_->cancelDone(sessionId, txId);
@@ -2312,6 +2328,11 @@ void OpenKeyEngine::handleRemoteRewriteDone(fcitx::InputContext *ic,
     return;
   }
 
+  if (debugEnabled()) {
+    FCITX_INFO() << "openkey: remote DONE session=" << sessionId
+                 << " txId=" << txId;
+  }
+
   auto *rewriteHandler = dynamic_cast<BackspaceRewriteModeHandler *>(
       backspaceRewriteHandler_.get());
   if (!rewriteHandler) {
@@ -2410,6 +2431,7 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {
   auto *ic = event.inputContext();
   auto *state = stateFor(ic);
+  state->isX11Environment = isRunningOnX11(ic);
   state->rewriteState.clear();
   state->composing.clear();
   state->preeditKeyBuffer.clear();

@@ -66,8 +66,15 @@ type planCommand struct {
 	commitDelay time.Duration
 }
 
+type waitCommand struct {
+	sessionID uint64
+	txID      uint64
+	delay     time.Duration
+}
+
 type sessionCommand struct {
 	plan   *planCommand
+	wait   *waitCommand
 	cancel bool
 	txID   uint64
 }
@@ -258,6 +265,29 @@ func (r *sessionRunner) loop() {
 			go func() {
 				defer r.wg.Done()
 				runPlan(ctx, r.out, plan, r.uinput)
+			}()
+			continue
+		}
+		if cmd.wait != nil {
+			if cancel != nil && r.currentTxID == cmd.wait.txID {
+				cancel()
+			}
+			ctx, nextCancel := context.WithCancel(context.Background())
+			cancel = nextCancel
+			r.currentTxID = cmd.wait.txID
+			waitCmd := *cmd.wait
+			logEvent("start wait session=%d tx=%d delay=%s",
+				waitCmd.sessionID, waitCmd.txID, waitCmd.delay)
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				if !waitOrCancel(ctx, waitCmd.delay) {
+					logEvent("cancelled before wait commit session=%d tx=%d", waitCmd.sessionID, waitCmd.txID)
+					return
+				}
+				logEvent("emit wait done session=%d tx=%d", waitCmd.sessionID, waitCmd.txID)
+				sendOrCancel(ctx, r.out, fmt.Sprintf("DONE %d %d\n",
+					waitCmd.sessionID, waitCmd.txID))
 			}()
 			continue
 		}
@@ -455,6 +485,33 @@ func (s *connectionState) handleLine(line string) error {
 				backspaces:  backspaces,
 				interKey:    time.Duration(interKeyUsec) * time.Microsecond,
 				commitDelay: time.Duration(commitDelayUsec) * time.Microsecond,
+			},
+		}
+		return nil
+	case "WAIT":
+		if len(parts) != 4 {
+			return fmt.Errorf("WAIT expects 4 fields, got %d", len(parts))
+		}
+		sessionID, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		txID, err := strconv.ParseUint(parts[2], 10, 64)
+		if err != nil {
+			return err
+		}
+		delayUsec, err := strconv.ParseUint(parts[3], 10, 64)
+		if err != nil {
+			return err
+		}
+		logEvent("nonPreedit wait session=%d tx=%d delay=%dus",
+			sessionID, txID, delayUsec)
+		runner := s.session(sessionID)
+		runner.cmds <- sessionCommand{
+			wait: &waitCommand{
+				sessionID: sessionID,
+				txID:      txID,
+				delay:     time.Duration(delayUsec) * time.Microsecond,
 			},
 		}
 		return nil

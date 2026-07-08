@@ -54,8 +54,6 @@ struct BackspaceRewriteState {
   int lateBackspaceBudget = 0;
   std::deque<fcitx::Key> queuedKeys;
   std::unique_ptr<fcitx::EventSourceTime> commitTimer;
-  std::unique_ptr<fcitx::EventSourceTime> lateBackspaceTimeoutTimer;
-  std::unique_ptr<fcitx::EventSourceTime> ackTimeoutTimer;
   std::string pendingConvertedText;
   std::string pendingShownTextAfterCommit;
   bool rawBackspaceAwaitingRelease = false;
@@ -93,8 +91,6 @@ struct BackspaceRewriteState {
     lateBackspaceBudget = 0;
     queuedKeys.clear();
     commitTimer.reset();
-    lateBackspaceTimeoutTimer.reset();
-    ackTimeoutTimer.reset();
     pendingConvertedText.clear();
     pendingShownTextAfterCommit.clear();
     rawBackspaceAwaitingRelease = false;
@@ -123,6 +119,7 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   bool modeDecided = false;
   std::string program;
   int codeTable = 0;
+  bool isX11Environment = false;
 };
 
 class OpenKeyEngine final : public fcitx::InputMethodEngineV2 {
