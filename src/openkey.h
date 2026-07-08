@@ -120,6 +120,8 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   std::string program;
   int codeTable = 0;
   bool isX11Environment = false;
+  // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển thị.
+  bool x11FirstWordPreedit = false;
 };
 
 class OpenKeyEngine final : public fcitx::InputMethodEngineV2 {
@@ -170,6 +172,9 @@ private:
 
   std::unique_ptr<InputModeHandler> preeditHandler_;
   std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
+
+  // Lưu lại thời điểm gõ phím cuối cùng toàn cục (tránh bị reset khi app gọi activate liên tục)
+  uint64_t lastKeyTime_ = 0;
 
   bool debugEnabled() const;
   void loadAppModes();

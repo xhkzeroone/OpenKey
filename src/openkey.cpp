@@ -2432,6 +2432,7 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
   auto *ic = event.inputContext();
   auto *state = stateFor(ic);
   state->isX11Environment = isRunningOnX11(ic);
+
   state->rewriteState.clear();
   state->composing.clear();
   state->preeditKeyBuffer.clear();
@@ -2446,6 +2447,19 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
         FCITX_INFO() << "openkey: bridge program=" << state->program;
       }
     }
+  }
+
+  // Lấy thời gian hiện tại để kiểm tra khoảng cách từ lần gõ phím cuối
+  uint64_t nowTime = fcitx::now(CLOCK_MONOTONIC);
+  // Nếu đã hơn 2 giây kể từ lần nhấn phím cuối cùng, coi như đây thực sự là bắt đầu gõ "từ đầu tiên".
+  // Nếu dưới 2 giây, có khả năng là ứng dụng đang tự động focus lại ngầm ở giữa một từ đang gõ dở, nên giữ nguyên trạng thái cũ.
+  // Đồng thời kiểm tra: nếu app hỗ trợ SurroundingText, HOẶC không phải trình duyệt (browser) thì không cần dùng mẹo Preedit này.
+  if (nowTime - lastKeyTime_ > 2000000) { // 2 seconds
+    bool hasSurrounding = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
+    bool isBrowser = isBrowserLikeProgram(state->program);
+    state->x11FirstWordPreedit = state->isX11Environment && !hasSurrounding && isBrowser;
+  } else {
+    state->x11FirstWordPreedit = false;
   }
 
   state->codeTable = toOpenKeyCodeTable(config_.codeTable.value());
@@ -2617,6 +2631,9 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
   auto *ic = event.inputContext();
   auto *state = stateFor(ic);
 
+  // Cập nhật lại thời điểm gõ phím toàn cục cho engine
+  lastKeyTime_ = fcitx::now(CLOCK_MONOTONIC);
+
   if (event.isRelease()) {
     if (state && state->mode == RuntimeMode::BackspaceRewrite &&
         backspaceRewriteHandler_) {
@@ -2768,14 +2785,42 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
   // Do not swallow application shortcuts, but ensure we don't leave a stale
   // composing buffer in preedit mode.
   if (hasCtrlAltSuperMeta(key)) {
-    if (state->modeDecided && state->mode == RuntimeMode::Preedit &&
+    RuntimeMode checkMode = state->mode;
+    // Fix kẹt chữ: Mặc dù mode hiện tại là BackspaceRewrite, nhưng nếu cờ x11FirstWordPreedit 
+    // đang bật thì bộ gõ thực chất đang chạy ngầm bằng Preedit. Ta phải báo cho hệ thống 
+    // biết nó là Preedit để dọn dẹp chữ gõ dở, nếu không chữ sẽ bị dính vĩnh viễn trên màn hình.
+    if (state->isX11Environment &&
+        state->mode == RuntimeMode::BackspaceRewrite &&
+        state->x11FirstWordPreedit) {
+      checkMode = RuntimeMode::Preedit;
+    }
+    
+    // Nếu đang có chữ gõ dở (!composing.empty()) mà người dùng bấm phím tắt (vd: Ctrl+C, Ctrl+S)
+    // thì xóa sạch chữ gõ dở đó đi (gọi reset).
+    if (state->modeDecided && checkMode == RuntimeMode::Preedit &&
         !state->composing.empty()) {
       preeditHandler_->reset(*state);
+    }
+    
+    // Bấm phím tắt đồng nghĩa với việc người dùng đã ngắt quãng việc gõ từ hiện tại (break).
+    // Hủy cờ Preedit tạm thời để chữ tiếp theo sau khi bấm phím tắt sẽ gõ bằng BackspaceRewrite.
+    if (state->x11FirstWordPreedit) {
+      state->x11FirstWordPreedit = false;
     }
     return;
   }
 
-  switch (state->mode) {
+  RuntimeMode effectiveMode = state->mode;
+  // Áp dụng tạm thời mode Preedit nếu cờ first word đang bật
+  if (state->isX11Environment &&
+      effectiveMode == RuntimeMode::BackspaceRewrite &&
+      state->x11FirstWordPreedit) {
+    effectiveMode = RuntimeMode::Preedit;
+  }
+
+  bool wasComposing = !state->composing.empty();
+
+  switch (effectiveMode) {
   case RuntimeMode::Auto:
     return;
   case RuntimeMode::DirectCommit:
@@ -2790,7 +2835,28 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     if (preeditHandler_) {
       preeditHandler_->handleKey(ic, event, *state);
     }
-    return;
+    break;
+  }
+
+  // Kiểm tra xem sự kiện vừa rồi có phải là một khoảng nghỉ (break) để thoát khỏi Preedit hay không
+  if (state->x11FirstWordPreedit && effectiveMode == RuntimeMode::Preedit) {
+    bool isBreak = false;
+    if (wasComposing && state->composing.empty()) {
+      // Nếu trước đó đang gõ chữ mà giờ trống trơn, ngoại trừ trường hợp bị người dùng chủ động xóa hết bằng Backspace/Escape.
+      if (!key.check(FcitxKey_BackSpace) && !key.check(FcitxKey_Escape)) {
+        isBreak = true;
+      }
+    } else if (!wasComposing && state->composing.empty()) {
+      // Nếu không phải đang gõ chữ, mọi thao tác ngoài modifier hay phím xóa đều coi là tạo ra khoảng nghỉ.
+      if (!key.isModifier() && !key.check(FcitxKey_BackSpace) &&
+          !key.check(FcitxKey_Escape) && !key.check(FcitxKey_Delete)) {
+        isBreak = true;
+      }
+    }
+    // Gỡ cờ first word và trở về lại với chế độ BackspaceRewrite cho các chữ tiếp theo.
+    if (isBreak) {
+      state->x11FirstWordPreedit = false;
+    }
   }
 }
 
