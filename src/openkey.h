@@ -175,6 +175,7 @@ private:
 
   // Lưu lại thời điểm gõ phím cuối cùng toàn cục (tránh bị reset khi app gọi activate liên tục)
   uint64_t lastKeyTime_ = 0;
+  bool isX11Environment_ = false;
 
   bool debugEnabled() const;
   void loadAppModes();

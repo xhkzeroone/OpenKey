@@ -670,8 +670,7 @@ static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{1000,
                                                                        80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
 
-static bool isRunningOnX11(fcitx::InputContext *ic) {
-  (void)ic;
+static bool isRunningOnX11() {
 
   const char *waylandDisplay = std::getenv("WAYLAND_DISPLAY");
   const char *x11Display = std::getenv("DISPLAY");
@@ -895,9 +894,8 @@ static bool trackedWordStillBeforeCursor(fcitx::InputContext *ic,
          seg.word == shownText;
 }
 
-static RewriteTiming backspaceRewriteTimingFor(fcitx::InputContext *ic,
+static RewriteTiming backspaceRewriteTimingFor(bool x11,
                                                const std::string &program) {
-  const bool x11 = isRunningOnX11(ic);
 
   if (x11 && isFirefoxLikeProgram(program)) {
     return kBackspaceRewriteX11FirefoxFamilyTiming;
@@ -1762,7 +1760,7 @@ private:
     const std::string oldShown = rewriteState.shownText;
     const std::string rawAppend =
         compareWithRawAppend ? oldShown + asciiChar : oldShown;
-    const RewriteTiming timing = backspaceRewriteTimingFor(ic, state.program);
+    const RewriteTiming timing = backspaceRewriteTimingFor(state.isX11Environment, state.program);
     const std::size_t prefixLen =
         commonPrefixBytesUTF8Boundary(rewriteState.shownText, newWord);
     unsigned int deleteCount =
@@ -1926,7 +1924,7 @@ private:
                         std::shared_ptr<OpenKeyAdapter> adapterShared,
                         bool debug) {
     auto &rewriteState = state.rewriteState;
-    const RewriteTiming timing = backspaceRewriteTimingFor(ic, state.program);
+    const RewriteTiming timing = backspaceRewriteTimingFor(state.isX11Environment, state.program);
     if (hasCtrlAltSuperMeta(queuedKey)) {
       clearComposeState(rewriteState, "ctrl-alt-super");
       return false;
@@ -2065,6 +2063,7 @@ private:
 
 OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
     : instance_(instance), adapter_(std::make_shared<OpenKeyAdapter>()) {
+  isX11Environment_ = isRunningOnX11();
   lifetime_ = std::make_shared<int>(1);
   instance_->inputContextManager().registerProperty("openkeyState", &factory_);
   remoteRewriteCoordinator_ = std::make_unique<RemoteRewriteCoordinator>(
@@ -2273,8 +2272,8 @@ void OpenKeyEngine::setAppModeForProgram(fcitx::InputContext *ic,
 }
 
 std::unordered_map<std::string, RuntimeMode> &
-OpenKeyEngine::appModeMapFor(fcitx::InputContext *ic) {
-  return isRunningOnX11(ic) ? x11AppModeMap_ : waylandAppModeMap_;
+OpenKeyEngine::appModeMapFor(fcitx::InputContext * /* ic */) {
+  return isX11Environment_ ? x11AppModeMap_ : waylandAppModeMap_;
 }
 
 OpenKeyState *OpenKeyEngine::stateFor(fcitx::InputContext *ic) {
@@ -2431,7 +2430,7 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
                              fcitx::InputContextEvent &event) {
   auto *ic = event.inputContext();
   auto *state = stateFor(ic);
-  state->isX11Environment = isRunningOnX11(ic);
+  state->isX11Environment = isX11Environment_;
 
   state->rewriteState.clear();
   state->composing.clear();
@@ -2453,11 +2452,16 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
   uint64_t nowTime = fcitx::now(CLOCK_MONOTONIC);
   // Nếu đã hơn 2 giây kể từ lần nhấn phím cuối cùng, coi như đây thực sự là bắt đầu gõ "từ đầu tiên".
   // Nếu dưới 2 giây, có khả năng là ứng dụng đang tự động focus lại ngầm ở giữa một từ đang gõ dở, nên giữ nguyên trạng thái cũ.
-  // Đồng thời kiểm tra: nếu app hỗ trợ SurroundingText, HOẶC không phải trình duyệt (browser) thì không cần dùng mẹo Preedit này.
   if (nowTime - lastKeyTime_ > 2000000) { // 2 seconds
-    bool hasSurrounding = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
-    bool isBrowser = isBrowserLikeProgram(state->program);
-    state->x11FirstWordPreedit = state->isX11Environment && !hasSurrounding && isBrowser;
+    // Mặc định là false
+    state->x11FirstWordPreedit = false;
+    // Kiểm tra ưu tiên theo ý muốn: Chỉ áp dụng trên X11 và nếu là Trình duyệt
+    if (state->isX11Environment && isBrowserLikeProgram(state->program)) {
+      // Nếu là trình duyệt nhưng KHÔNG hỗ trợ SurroundingText thì mới bật cờ
+      if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        state->x11FirstWordPreedit = true;
+      }
+    }
   } else {
     state->x11FirstWordPreedit = false;
   }
