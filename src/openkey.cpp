@@ -697,28 +697,6 @@ static std::string getCombinedProgramInfo(const OpenKeyState &state) {
 
 static bool isBrowserLikeProgram(const OpenKeyState &state);
 
-static bool isMetaAppOrWeb(const OpenKeyState &state) {
-  if (state.program.empty() && state.windowTitle.empty()) {
-    return true;
-  }
-  // Nếu là trình duyệt nhưng không có windowTitle (do tắt extension),
-  // ta không thể biết web gì, nên mặc định trả về true để dùng delay an toàn
-  // (40ms/30ms)
-  if (state.windowTitle.empty() && isBrowserLikeProgram(state)) {
-    return true;
-  }
-  const std::string base = asciiLower(getCombinedProgramInfo(state));
-  static const std::vector<std::string> kMetaPatterns = {
-      "messenger", "facebook", "instagram", "whatsapp", "threads",
-  };
-  for (const auto &pattern : kMetaPatterns) {
-    if (base.find(pattern) != std::string::npos) {
-      return true;
-    }
-  }
-  return false;
-}
-
 static bool isFirefoxLikeProgram(const OpenKeyState &state) {
   if (state.program.empty() && state.windowTitle.empty()) {
     return false;
@@ -737,8 +715,6 @@ static bool isFirefoxLikeProgram(const OpenKeyState &state) {
   }
   return false;
 }
-
-
 
 static bool needsTransientResetPreserve(const OpenKeyState &state) {
   return isFirefoxLikeProgram(state) && state.isFirstWordSinceFocus;
@@ -1804,15 +1780,8 @@ public:
                          << rewriteState.seenBackspaces;
           }
           if (deps_.remoteScheduleWait) {
-            // Ứng dụng thuộc họ Meta (Messenger, Facebook, WhatsApp...): X11 =
-            // 40ms, Wayland = 30ms
-            if (isMetaAppOrWeb(state)) {
-              deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 40000 : 30000);
-            } else {
-              deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 30000 : 20000);
-            }
+            deps_.remoteScheduleWait(state,
+                                     state.isX11Environment ? 50000 : 30000);
           }
           event.filterAndAccept();
           return true;
