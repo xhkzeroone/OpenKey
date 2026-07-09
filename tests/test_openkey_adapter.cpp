@@ -194,6 +194,7 @@ int main() {
     expectEq("nguoiwf", typeSequence(adapter, "nguoiwf"), "người");
     expectEq("ddww", typeSequence(adapter, "ddww"), "đw");
     expectEq("pussh", typeSequence(adapter, "pussh"), "push");
+    expectEq("dduwocj", typeSequence(adapter, "dduwocj"), "được");
     {
         auto restoreAdapter = makeAdapter();
         const std::string shown = typeSequence(restoreAdapter, "pussh");

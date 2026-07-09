@@ -1471,7 +1471,7 @@ public:
                                        state.isX11Environment ? 40000 : 30000);
             } else {
               deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 20000 : 15000);
+                                       state.isX11Environment ? 30000 : 20000);
             }
           }
           event.filterAndAccept();
