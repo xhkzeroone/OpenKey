@@ -68,7 +68,6 @@ struct BackspaceRewriteState {
   bool canReseedFromBackspaceSnapshot = false;
   bool restoredFromBackspaceSnapshot = false;
   bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-  bool allowBackspaceSnapshotResetPreserve = false;
   bool allowTransientResetPreserve = false;
 
   bool hasRemoteRewritePending() const {
@@ -102,7 +101,6 @@ struct BackspaceRewriteState {
     canReseedFromBackspaceSnapshot = false;
     restoredFromBackspaceSnapshot = false;
     preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-    allowBackspaceSnapshotResetPreserve = false;
     allowTransientResetPreserve = false;
   }
 };
@@ -123,6 +121,7 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   bool isX11Environment = false;
   // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển thị.
   bool x11FirstWordPreedit = false;
+  bool isFirstWordSinceFocus = true;
 };
 
 class OpenKeyEngine final : public fcitx::InputMethodEngineV2 {

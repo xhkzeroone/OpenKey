@@ -696,7 +696,8 @@ static bool isMetaAppOrWeb(const OpenKeyState &state) {
     return true;
   }
   // Nếu là trình duyệt nhưng không có windowTitle (do tắt extension),
-  // ta không thể biết web gì, nên mặc định trả về true để dùng delay an toàn (40ms/30ms)
+  // ta không thể biết web gì, nên mặc định trả về true để dùng delay an toàn
+  // (40ms/30ms)
   if (state.windowTitle.empty() && isBrowserLikeProgram(state)) {
     return true;
   }
@@ -732,7 +733,7 @@ static bool isFirefoxLikeProgram(const OpenKeyState &state) {
 }
 
 static bool needsTransientResetPreserve(const OpenKeyState &state) {
-  return isFirefoxLikeProgram(state);
+  return isFirefoxLikeProgram(state) && state.isFirstWordSinceFocus;
 }
 
 static bool isBrowserLikeProgram(const OpenKeyState &state) {
@@ -911,13 +912,21 @@ static bool trackedWordStillBeforeCursor(fcitx::InputContext *ic,
     return !requireSurroundingText;
   }
 
-  if (st.cursor() != st.anchor() ||
-      st.cursor() > fcitx::utf8::length(st.text())) {
+  unsigned int checkCursor = st.cursor();
+  if (st.cursor() != st.anchor()) {
+    if (looksLikeBrowserAutocomplete(ic, shownText)) {
+      checkCursor = std::min(st.cursor(), st.anchor());
+    } else {
+      return false;
+    }
+  }
+
+  if (checkCursor > fcitx::utf8::length(st.text())) {
     return false;
   }
 
   WordSegment seg;
-  return extractWordBeforeCursor(st.text(), st.cursor(), seg) &&
+  return extractWordBeforeCursor(st.text(), checkCursor, seg) &&
          seg.word == shownText;
 }
 
@@ -1403,6 +1412,15 @@ public:
 
   bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                  OpenKeyState &state) override {
+    if (isFirefoxLikeProgram(state) && state.rewriteState.shownText.empty()) {
+      if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        const auto &st = ic->surroundingText();
+        if (st.isValid() && st.text().empty()) {
+          state.isFirstWordSinceFocus = true;
+        }
+      }
+    }
+
     auto key = event.rawKey();
     auto normKey = event.key().normalize();
     const auto adapterShared = deps_.adapter;
@@ -1471,7 +1489,7 @@ public:
       if (needsTransientResetPreserve(state) &&
           !rewriteState.shownText.empty() &&
           !trackedWordStillBeforeCursor(ic, rewriteState.shownText, false)) {
-        clearComposeState(rewriteState, "backspace-cursor-mismatch");
+        clearComposeState(state, "backspace-cursor-mismatch");
         return false;
       }
       if (restoreBackspaceSnapshot(rewriteState)) {
@@ -1518,7 +1536,7 @@ public:
     const uint32_t uni = fcitx::Key::keySymToUnicode(normKey.sym());
 
     if (!(uni >= 0x20 && uni <= 0x7E)) {
-      clearComposeState(rewriteState, "non-printable-boundary");
+      clearComposeState(state, "non-printable-boundary");
       return false;
     }
 
@@ -1542,7 +1560,7 @@ public:
     if (key.isCursorMove() || normKey.isCursorMove() ||
         key.check(FcitxKey_Delete) || normKey.check(FcitxKey_Delete) ||
         key.check(FcitxKey_Escape) || normKey.check(FcitxKey_Escape)) {
-      clearComposeState(rewriteState, "cursor-delete");
+      clearComposeState(state, "cursor-delete");
     }
 
     return false;
@@ -1591,7 +1609,6 @@ private:
     rewriteState.backspaceSnapshotHasRewrittenCurrentWord = false;
     rewriteState.canReseedFromBackspaceSnapshot = false;
     rewriteState.preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-    rewriteState.allowBackspaceSnapshotResetPreserve = false;
   }
 
   void rememberBackspaceSnapshot(BackspaceRewriteState &rewriteState) const {
@@ -1633,8 +1650,7 @@ private:
                      << rewriteState.backspaceSnapshotShownText
                      << " snapshotRaw="
                      << rewriteState.backspaceSnapshotRawAsciiBuffer
-                     << " canReseed="
-                     << rewriteState.canReseedFromBackspaceSnapshot;
+                     << " canReseed=" << rewriteState.canReseedFromBackspaceSnapshot;
       }
       return false;
     }
@@ -1643,7 +1659,6 @@ private:
     rewriteState.hasRewrittenCurrentWord =
         rewriteState.backspaceSnapshotHasRewrittenCurrentWord;
     rewriteState.restoredFromBackspaceSnapshot = true;
-    rewriteState.allowBackspaceSnapshotResetPreserve = true;
     if (deps_.debugEnabled && deps_.debugEnabled()) {
       FCITX_INFO() << "openkey: bs-snapshot restore"
                    << " mode=backspaceRewrite"
@@ -1652,13 +1667,15 @@ private:
                    << " rewritten=" << rewriteState.hasRewrittenCurrentWord;
     }
     clearBackspaceSnapshot(rewriteState);
-    rewriteState.allowBackspaceSnapshotResetPreserve = true;
     return true;
   }
 
-  void clearComposeState(BackspaceRewriteState &rewriteState,
-                         const char *reason = "unknown",
-                         bool clearSnapshot = true) const {
+  void clearComposeState(OpenKeyState &state,
+                         const char *reason, bool clearSnapshot = true) {
+    auto &rewriteState = state.rewriteState;
+    if (!rewriteState.shownText.empty()) {
+      state.isFirstWordSinceFocus = false;
+    }
 
     if (deps_.debugEnabled && deps_.debugEnabled()) {
       FCITX_INFO() << "openkey: backspace-rewrite clear"
@@ -1673,7 +1690,6 @@ private:
     rewriteState.rawAsciiBuffer.clear();
     rewriteState.hasRewrittenCurrentWord = false;
     rewriteState.restoredFromBackspaceSnapshot = false;
-    rewriteState.allowBackspaceSnapshotResetPreserve = false;
     rewriteState.allowTransientResetPreserve = false;
     rewriteState.rewriteLock = false;
     rewriteState.waitingBackspaceAck = false;
@@ -1725,17 +1741,18 @@ private:
     finishPostCommitPump(ic, state);
   }
 
-  bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
+  bool schedulePostCommitPump(
+      fcitx::InputContext *ic, OpenKeyState &state,
+      uint64_t delayUsec = kBackspaceRewritePostCommitPumpDelayUsec) {
     auto &rewriteState = state.rewriteState;
-    if (!deps_.instance || kBackspaceRewritePostCommitPumpDelayUsec == 0) {
+    if (!deps_.instance || delayUsec == 0) {
       return false;
     }
 
     const auto icRef = ic->watch();
     const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
     auto *loop = &deps_.instance->eventLoop();
-    const uint64_t deadline =
-        fcitx::now(CLOCK_MONOTONIC) + kBackspaceRewritePostCommitPumpDelayUsec;
+    const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
 
     rewriteState.commitTimer = loop->addTimeEvent(
         CLOCK_MONOTONIC, deadline, 0,
@@ -1784,7 +1801,7 @@ private:
     }
     if (!fcitx::utf8::validate(rewriteState.shownText) ||
         !fcitx::utf8::validate(newWord)) {
-      clearComposeState(rewriteState, "invalid-utf8");
+      clearComposeState(state, "invalid-utf8");
       return false;
     }
 
@@ -1832,7 +1849,6 @@ private:
       rewriteState.hasRewrittenCurrentWord =
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
-      rewriteState.allowBackspaceSnapshotResetPreserve = false;
       rewriteState.allowTransientResetPreserve = true;
       return true;
     }
@@ -1852,7 +1868,6 @@ private:
       rewriteState.hasRewrittenCurrentWord =
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
-      rewriteState.allowBackspaceSnapshotResetPreserve = false;
       rewriteState.allowTransientResetPreserve = true;
       if (deps_.remoteSchedule(ic, state, deleteCount, timing.interKeyUsec,
                                serverCommitDelay)) {
@@ -1866,7 +1881,7 @@ private:
       rewriteState.pendingShownTextAfterCommit.clear();
     }
 
-    clearComposeState(rewriteState, "default");
+    clearComposeState(state, "default");
     return false;
   }
 
@@ -1904,9 +1919,7 @@ private:
     } else {
       rememberBackspaceSnapshot(rewriteState);
       forwardKeyPressAndRelease(ic, boundaryKey);
-      clearComposeState(rewriteState, "macro-boundary", false);
-      rewriteState.allowBackspaceSnapshotResetPreserve =
-          needsTransientResetPreserve(state) && trigger == ' ';
+      clearComposeState(state, "macro-boundary", false);
     }
     return true;
   }
@@ -1944,9 +1957,7 @@ private:
     } else {
       rememberBackspaceSnapshot(rewriteState);
       forwardKeyPressAndRelease(ic, boundaryKey);
-      clearComposeState(rewriteState, "restore-boundary", false);
-      rewriteState.allowBackspaceSnapshotResetPreserve =
-          needsTransientResetPreserve(state) && trigger == ' ';
+      clearComposeState(state, "restore-boundary", false);
     }
     return true;
   }
@@ -1959,17 +1970,17 @@ private:
     const RewriteTiming timing =
         backspaceRewriteTimingFor(state.isX11Environment, state);
     if (hasCtrlAltSuperMeta(queuedKey)) {
-      clearComposeState(rewriteState, "ctrl-alt-super");
+      clearComposeState(state, "ctrl-alt-super");
       return false;
     }
 
     if (queuedKey.isCursorMove() || queuedKey.check(FcitxKey_Delete)) {
-      clearComposeState(rewriteState, "cursor-delete");
+      clearComposeState(state, "cursor-delete");
       return false;
     }
 
     if (queuedKey.check(FcitxKey_Escape)) {
-      clearComposeState(rewriteState, "escape");
+      clearComposeState(state, "escape");
       return false;
     }
 
@@ -1977,7 +1988,7 @@ private:
       if (needsTransientResetPreserve(state) &&
           !rewriteState.shownText.empty() &&
           !trackedWordStillBeforeCursor(ic, rewriteState.shownText, false)) {
-        clearComposeState(rewriteState, "backspace-cursor-mismatch");
+        clearComposeState(state, "backspace-cursor-mismatch");
         return false;
       }
       if (restoreBackspaceSnapshot(rewriteState)) {
@@ -1987,7 +1998,7 @@ private:
         return false;
       }
       if (!rewriteState.hasRewrittenCurrentWord) {
-        clearComposeState(rewriteState, "backspace-empty-or-not-rewritten");
+        clearComposeState(state, "backspace-empty-or-not-rewritten");
         return false;
       }
       const auto method = deps_.backspaceInjector->sendBackspaces(
@@ -2027,16 +2038,14 @@ private:
           return true;
         }
         rememberBackspaceSnapshot(rewriteState);
-        clearComposeState(rewriteState, "boundary", false);
-        rewriteState.allowBackspaceSnapshotResetPreserve =
-            needsTransientResetPreserve(state) && c == ' ';
+        clearComposeState(state, "boundary", false);
         return false;
       }
 
       // Only composing chars go to the engine.
       // Non-composing non-boundary chars (e.g. !@#$) clear state and forward.
       if (!isComposingASCII(c)) {
-        clearComposeState(rewriteState, "not-composing-ascii");
+        clearComposeState(state, "not-composing-ascii");
         return false;
       }
 
@@ -2048,25 +2057,25 @@ private:
       if (needsTransientResetPreserve(state) &&
           !rewriteState.shownText.empty() &&
           !trackedWordStillBeforeCursor(ic, rewriteState.shownText, false)) {
-        clearComposeState(rewriteState, "ascii-cursor-mismatch");
+        clearComposeState(state, "ascii-cursor-mismatch");
         return false;
       }
 
       if (!adapterShared) {
-        clearComposeState(rewriteState, "no-adapter");
+        clearComposeState(state, "no-adapter");
         return false;
       }
       adapterShared->setCodeTable(state.codeTable);
       const auto r = adapterShared->processAsciiKey(rewriteState.shownText, c);
       if (!r.handled) {
-        clearComposeState(rewriteState, "adapter-not-handled");
+        clearComposeState(state, "adapter-not-handled");
         return false;
       }
       rewriteState.rawAsciiBuffer.push_back(c);
       return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
     }
 
-    clearComposeState(rewriteState, "non-ascii-key");
+    clearComposeState(state, "non-ascii-key");
     return false;
   }
 
@@ -2076,17 +2085,29 @@ private:
     if (rewriteState.processingQueue || rewriteState.rewriteLock) {
       return;
     }
-    rewriteState.processingQueue = true;
-    while (!rewriteState.rewriteLock && !rewriteState.queuedKeys.empty()) {
-      const fcitx::Key queuedKey = rewriteState.queuedKeys.front();
-      rewriteState.queuedKeys.pop_front();
-      const bool handled =
-          processQueuedKey(ic, state, queuedKey, adapterShared, debug);
-      if (!handled) {
-        forwardKeyPressAndRelease(ic, queuedKey);
-      }
+    if (rewriteState.queuedKeys.empty()) {
+      return;
     }
+    
+    if (debug) {
+      FCITX_INFO() << "openkey: pumpQueue processing, queue size=" << rewriteState.queuedKeys.size();
+    }
+    
+    rewriteState.processingQueue = true;
+
+    const fcitx::Key queuedKey = rewriteState.queuedKeys.front();
+    rewriteState.queuedKeys.pop_front();
+    const bool handled =
+        processQueuedKey(ic, state, queuedKey, adapterShared, debug);
+    if (!handled) {
+      forwardKeyPressAndRelease(ic, queuedKey);
+    }
+
     rewriteState.processingQueue = false;
+
+    if (!rewriteState.queuedKeys.empty() && !rewriteState.rewriteLock) {
+      schedulePostCommitPump(ic, state, 10000);
+    }
   }
 
   BackspaceRewriteDeps deps_;
@@ -2524,6 +2545,16 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                           fcitx::InputContextEvent &event) {
   auto *ic = event.inputContext();
   auto *state = stateFor(ic);
+
+  if (isFirefoxLikeProgram(*state)) {
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+      const auto &st = ic->surroundingText();
+      if (st.isValid() && st.text().empty()) {
+        state->isFirstWordSinceFocus = true;
+      }
+    }
+  }
+
   const bool snapshotEnabled = config_.enableBackspaceSnapshot.value();
 
   const bool transientResetKeepRewrite =
@@ -2537,12 +2568,10 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
   const bool preserveRewrite =
       transientResetKeepRewrite ||
       (snapshotEnabled && state->rewriteState.restoredFromBackspaceSnapshot &&
-       !state->rewriteState.shownText.empty() &&
-       state->rewriteState.allowBackspaceSnapshotResetPreserve);
+       !state->rewriteState.shownText.empty());
 
   const bool preserveRewriteSnapshot =
       snapshotEnabled && !preserveRewrite &&
-      state->rewriteState.allowBackspaceSnapshotResetPreserve &&
       state->rewriteState.preserveBackspaceSnapshotAfterBoundaryBackspace &&
       state->rewriteState.canReseedFromBackspaceSnapshot &&
       !state->rewriteState.backspaceSnapshotShownText.empty();
@@ -2566,8 +2595,6 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
                  << " transientResetKeepRewrite=" << transientResetKeepRewrite
                  << " preserveRewrite=" << preserveRewrite
                  << " preserveRewriteSnapshot=" << preserveRewriteSnapshot
-                 << " rewriteAllowPreserve="
-                 << state->rewriteState.allowBackspaceSnapshotResetPreserve
                  << " rewriteShown=" << state->rewriteState.shownText
                  << " rewriteRaw=" << state->rewriteState.rawAsciiBuffer
                  << " rewriteAllowTransientResetPreserve="
@@ -2584,7 +2611,6 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         rewriteAllowTransientResetPreserve;
     state->rewriteState.restoredFromBackspaceSnapshot =
         false; // Transient reset preserve, not a snapshot restore.
-    state->rewriteState.allowBackspaceSnapshotResetPreserve = false;
     if (debugEnabled()) {
       FCITX_INFO() << "openkey: reset preserve"
                    << " mode=backspaceRewrite"
@@ -2602,7 +2628,6 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
         rewriteSnapshotRewritten;
     state->rewriteState.canReseedFromBackspaceSnapshot = true;
     state->rewriteState.preserveBackspaceSnapshotAfterBoundaryBackspace = true;
-    state->rewriteState.allowBackspaceSnapshotResetPreserve = false;
     if (debugEnabled()) {
       FCITX_INFO() << "openkey: reset preserve-snapshot"
                    << " mode=backspaceRewrite"
