@@ -1725,9 +1725,9 @@ private:
     finishPostCommitPump(ic, state);
   }
 
-  bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
+  bool schedulePostCommitPump(fcitx::InputContext *ic, OpenKeyState &state, uint64_t delayUsec = kBackspaceRewritePostCommitPumpDelayUsec) {
     auto &rewriteState = state.rewriteState;
-    if (!deps_.instance || kBackspaceRewritePostCommitPumpDelayUsec == 0) {
+    if (!deps_.instance || delayUsec == 0) {
       return false;
     }
 
@@ -1735,7 +1735,7 @@ private:
     const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
     auto *loop = &deps_.instance->eventLoop();
     const uint64_t deadline =
-        fcitx::now(CLOCK_MONOTONIC) + kBackspaceRewritePostCommitPumpDelayUsec;
+        fcitx::now(CLOCK_MONOTONIC) + delayUsec;
 
     rewriteState.commitTimer = loop->addTimeEvent(
         CLOCK_MONOTONIC, deadline, 0,
@@ -2076,17 +2076,24 @@ private:
     if (rewriteState.processingQueue || rewriteState.rewriteLock) {
       return;
     }
-    rewriteState.processingQueue = true;
-    while (!rewriteState.rewriteLock && !rewriteState.queuedKeys.empty()) {
-      const fcitx::Key queuedKey = rewriteState.queuedKeys.front();
-      rewriteState.queuedKeys.pop_front();
-      const bool handled =
-          processQueuedKey(ic, state, queuedKey, adapterShared, debug);
-      if (!handled) {
-        forwardKeyPressAndRelease(ic, queuedKey);
-      }
+    if (rewriteState.queuedKeys.empty()) {
+      return;
     }
+    rewriteState.processingQueue = true;
+    
+    const fcitx::Key queuedKey = rewriteState.queuedKeys.front();
+    rewriteState.queuedKeys.pop_front();
+    const bool handled =
+        processQueuedKey(ic, state, queuedKey, adapterShared, debug);
+    if (!handled) {
+      forwardKeyPressAndRelease(ic, queuedKey);
+    }
+    
     rewriteState.processingQueue = false;
+
+    if (!rewriteState.queuedKeys.empty() && !rewriteState.rewriteLock) {
+      schedulePostCommitPump(ic, state, 10000);
+    }
   }
 
   BackspaceRewriteDeps deps_;
