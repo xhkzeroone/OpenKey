@@ -1211,6 +1211,7 @@ struct BackspaceRewriteDeps {
   std::function<bool()> restoreIfWrongSpelling;
   std::function<bool()> enableBackspaceSnapshot;
   std::function<bool()> rawBackspaceRewriteEnabled;
+  std::function<bool()> enableSurroundingFastPath;
   std::function<bool()> remoteEnabled;
   std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
                      uint64_t, uint64_t)>
@@ -2193,6 +2194,34 @@ private:
       return true;
     }
 
+    if (!browserAutocomplete && deps_.enableSurroundingFastPath &&
+        deps_.enableSurroundingFastPath() &&
+        ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+      bool hasMultibyte = false;
+      for (char c : rewriteState.shownText.substr(prefixLen)) {
+        if ((c & 0x80) != 0) {
+          hasMultibyte = true;
+          break;
+        }
+      }
+      if (!hasMultibyte) {
+        if (debug) {
+          FCITX_INFO() << "openkey: backspace-rewrite fast path ST deleteCount="
+                       << deleteCount;
+        }
+        ic->deleteSurroundingText(-static_cast<int>(deleteCount), deleteCount);
+        if (!commitText.empty()) {
+          ic->commitString(commitText);
+        }
+        rewriteState.shownText = newWord;
+        rewriteState.hasRewrittenCurrentWord =
+            rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
+        rewriteState.restoredFromBackspaceSnapshot = false;
+        rewriteState.allowTransientResetPreserve = true;
+        return true;
+      }
+    }
+
     if (deps_.remoteEnabled && deps_.remoteEnabled() && deps_.remoteSchedule) {
       const uint64_t keysTime = timing.interKeyUsec * (deleteCount + 1);
       const uint64_t serverCommitDelay = timing.commitDelayUsec > keysTime
@@ -2486,6 +2515,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
   };
   rewriteDeps.rawBackspaceRewriteEnabled = [this]() {
     return config_.enableRawBackspaceRewrite.value();
+  };
+  rewriteDeps.enableSurroundingFastPath = [this]() {
+    return config_.enableSurroundingFastPath.value();
   };
   rewriteDeps.remoteEnabled = [this]() {
     return remoteRewriteCoordinator_ && remoteRewriteCoordinator_->enabled();
