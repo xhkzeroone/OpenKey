@@ -40,6 +40,7 @@ enum class RuntimeMode {
   BackspaceRewrite,
   Preedit,
   DirectCommit,
+  Surrounding,
 };
 
 struct BackspaceRewriteState {
@@ -122,6 +123,17 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển thị.
   bool x11FirstWordPreedit = false;
   bool isFirstWordSinceFocus = true;
+  // SurroundingTextModeHandler states
+  std::string macroBuffer;
+  std::string rollbackWord;
+  std::string rollbackDisplay;
+  std::string rollbackRawBuffer;
+  std::string rollbackSnapshotWord;
+  std::string rollbackSnapshotDisplay;
+  std::string rollbackSnapshotRawBuffer;
+  std::string lastCommitted;
+  bool canReseedRollbackSnapshot = false;
+  bool noSeedNextWord = false;
 };
 
 class OpenKeyEngine final : public fcitx::InputMethodEngineV2 {
@@ -172,6 +184,7 @@ private:
 
   std::unique_ptr<InputModeHandler> preeditHandler_;
   std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
+  std::unique_ptr<InputModeHandler> surroundingHandler_;
 
   // Lưu lại thời điểm gõ phím cuối cùng toàn cục (tránh bị reset khi app gọi activate liên tục)
   uint64_t lastKeyTime_ = 0;
