@@ -200,6 +200,10 @@ fi
 
 update_icon_cache
 
+echo "[openkey] Clearing app-modes cache"
+rm -f "$HOME/.config/fcitx5/conf/openkey-appmodes-x11.conf" >/dev/null 2>&1 || true
+rm -f "$HOME/.config/fcitx5/conf/openkey-appmodes-wayland.conf" >/dev/null 2>&1 || true
+
 echo "[openkey] Restarting fcitx5"
 fcitx5 -rd >/dev/null 2>&1 || true
 
