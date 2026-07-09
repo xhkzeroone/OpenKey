@@ -2163,9 +2163,17 @@ private:
       return true;
     }
 
+    bool stReliable = false;
     if (!browserAutocomplete && deps_.enableSurroundingFastPath &&
         deps_.enableSurroundingFastPath() &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+      const auto &st = ic->surroundingText();
+      if (st.isValid()) {
+        stReliable = true;
+      }
+    }
+
+    if (stReliable) {
       bool hasMultibyte = false;
       for (char c : rewriteState.shownText.substr(prefixLen)) {
         if ((c & 0x80) != 0) {
