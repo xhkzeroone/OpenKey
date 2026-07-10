@@ -675,6 +675,7 @@ static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{1000, 80000};
 static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{1000,
                                                                        80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
+static constexpr uint64_t kSurroundingFastPathSettleDelayUsec = 20000;
 
 static bool isRunningOnX11() {
 
@@ -2211,6 +2212,8 @@ private:
           FCITX_INFO() << "openkey: backspace-rewrite fast path ST deleteCount="
                        << deleteCount;
         }
+        // deleteSurroundingText/commitString are asynchronous at some
+        rewriteState.rewriteLock = true;
         ic->deleteSurroundingText(-static_cast<int>(deleteCount), deleteCount);
         if (!commitText.empty()) {
           ic->commitString(commitText);
@@ -2220,6 +2223,13 @@ private:
             rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
         rewriteState.restoredFromBackspaceSnapshot = false;
         rewriteState.allowTransientResetPreserve = true;
+        // deleteSurroundingText/commitString are asynchronous at some
+        // frontends. Queue a following rewrite briefly so an injected
+        // backspace cannot race the surrounding-text update.
+        if (!schedulePostCommitPump(ic, state,
+                                    kSurroundingFastPathSettleDelayUsec)) {
+          rewriteState.rewriteLock = false;
+        }
         return true;
       }
     }
