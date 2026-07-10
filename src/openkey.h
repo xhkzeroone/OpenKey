@@ -69,7 +69,6 @@ struct BackspaceRewriteState {
   bool canReseedFromBackspaceSnapshot = false;
   bool restoredFromBackspaceSnapshot = false;
   bool preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-  bool allowTransientResetPreserve = false;
 
   bool hasRemoteRewritePending() const {
     return remoteRewritePending || remotePendingTxId != 0;
@@ -102,13 +101,13 @@ struct BackspaceRewriteState {
     canReseedFromBackspaceSnapshot = false;
     restoredFromBackspaceSnapshot = false;
     preserveBackspaceSnapshotAfterBoundaryBackspace = false;
-    allowTransientResetPreserve = false;
   }
 };
 
 struct OpenKeyState : public fcitx::InputContextProperty {
   BackspaceRewriteState rewriteState;
   std::unique_ptr<fcitx::EventSourceTime> modeInfoTimer;
+  std::unique_ptr<fcitx::EventSourceTime> lazyResetTimer;
 
   std::string composing;
   std::string preeditKeyBuffer;
@@ -122,7 +121,6 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   bool isX11Environment = false;
   // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển thị.
   bool x11FirstWordPreedit = false;
-  bool isFirstWordSinceFocus = true;
   // SurroundingTextModeHandler states
   std::string macroBuffer;
   std::string rollbackWord;
