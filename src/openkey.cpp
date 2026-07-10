@@ -1103,6 +1103,15 @@ static unsigned int utf8CharCount(const std::string &s) {
   return static_cast<unsigned int>(fcitx::utf8::length(s));
 }
 
+// Treat Space as a word boundary only when it is the unmodified Space key.
+// Checking the keysym directly also covers keypad Space on backends where it
+// does not convert to ASCII U+0020.
+static bool isPlainSpaceKey(const fcitx::Key &key) {
+  const auto sym = key.sym();
+  return (sym == FcitxKey_space || sym == FcitxKey_KP_Space) &&
+         !key.hasModifier();
+}
+
 static bool isMacroTriggerKey(char c) {
   if (c == ' ') {
     return true;
@@ -1312,12 +1321,19 @@ public:
       return false;
     }
 
+    const bool plainSpace = isPlainSpaceKey(key);
     const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
-    if (!(uni >= 0x20 && uni <= 0x7E)) {
+    if (!plainSpace && !(uni >= 0x20 && uni <= 0x7E)) {
       clearState("non_ascii");
       return false;
     }
-    const char c = static_cast<char>(uni);
+    const char c = plainSpace ? ' ' : static_cast<char>(uni);
+
+    // A modified Space is an application shortcut, not a word boundary.
+    if (c == ' ' && !plainSpace) {
+      clearState("modified_space");
+      return false;
+    }
 
     if (isComposingASCII(c) && !state.rollbackDisplay.empty()) {
       const auto &st = ic->surroundingText();
@@ -1386,7 +1402,7 @@ public:
       return replaceRollbackDisplay(restoredWord);
     };
 
-    if (isBoundaryASCII(c)) {
+    if (isBoundaryASCII(c) && (c != ' ' || plainSpace)) {
       if (!expandMacroBeforeBoundary(c)) {
         restoreBeforeBoundary(c);
       }
@@ -1603,10 +1619,12 @@ public:
       return false;
     }
 
+    const bool plainSpace = isPlainSpaceKey(key);
     const uint32_t uni = fcitx::Key::keySymToUnicode(key.sym());
     const std::string utf8 = fcitx::Key::keySymToUTF8(key.sym());
 
-    if (!state.composing.empty() && (utf8.empty() || uni > 0x7F)) {
+    if (!plainSpace && !state.composing.empty() &&
+        (utf8.empty() || uni > 0x7F)) {
       commitAndClearPreedit(ic, state);
       return false;
     }
@@ -1643,14 +1661,20 @@ public:
       return true;
     };
 
-    if (uni >= 0x20 && uni <= 0x7E) {
-      const char c = static_cast<char>(uni);
+    if (plainSpace || (uni >= 0x20 && uni <= 0x7E)) {
+      const char c = plainSpace ? ' ' : static_cast<char>(uni);
 
-      if (c == ' ') {
+      if (plainSpace) {
         if (!expandMacroBeforeBoundary(c)) {
           restoreBeforeBoundary(c);
         }
         return commitPreeditAndMaybeAppend(" ");
+      }
+      // Let modified Space reach the application after committing preedit;
+      // it must not trigger word-boundary macro/restore handling.
+      if (c == ' ') {
+        commitAndClearPreedit(ic, state);
+        return false;
       }
       if (!isComposingASCII(c)) {
         const std::string boundaryUtf8 = fcitx::Key::keySymToUTF8(key.sym());
@@ -1842,15 +1866,16 @@ public:
       return false;
     }
 
+    const bool plainSpace = isPlainSpaceKey(key) || isPlainSpaceKey(normKey);
     const uint32_t uni = fcitx::Key::keySymToUnicode(normKey.sym());
 
-    if (!(uni >= 0x20 && uni <= 0x7E)) {
+    if (!plainSpace && !(uni >= 0x20 && uni <= 0x7E)) {
       clearComposeState(state, "non-printable-boundary");
       return false;
     }
 
-    if (uni >= 0x20 && uni <= 0x7E) {
-      const char c = static_cast<char>(uni);
+    if (plainSpace || (uni >= 0x20 && uni <= 0x7E)) {
+      const char c = plainSpace ? ' ' : static_cast<char>(uni);
       if (!isComposingASCII(c)) {
         const bool handled =
             processQueuedKey(ic, state, key, adapterShared, debug);
@@ -2366,12 +2391,20 @@ private:
     }
 
     const auto normalizedKey = queuedKey.normalize();
+    const bool plainSpace = isPlainSpaceKey(queuedKey) ||
+                            isPlainSpaceKey(normalizedKey);
     const uint32_t uni = fcitx::Key::keySymToUnicode(normalizedKey.sym());
-    if (uni >= 0x20 && uni <= 0x7E) {
-      const char c = static_cast<char>(uni);
+    if (plainSpace || (uni >= 0x20 && uni <= 0x7E)) {
+      const char c = plainSpace ? ' ' : static_cast<char>(uni);
+
+      if (c == ' ' && !plainSpace) {
+        clearComposeState(state, "modified_space");
+        return false;
+      }
 
       // Word boundaries: clear composition state, forward to app
-      if (isBoundaryASCII(c) || queuedKey.check(FcitxKey_Return) ||
+      if ((isBoundaryASCII(c) && (c != ' ' || plainSpace)) ||
+          queuedKey.check(FcitxKey_Return) ||
           queuedKey.check(FcitxKey_KP_Enter) ||
           queuedKey.check(FcitxKey_ISO_Enter) ||
           queuedKey.check(FcitxKey_Tab)) {
