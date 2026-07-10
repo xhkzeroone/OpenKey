@@ -2178,6 +2178,10 @@ private:
     }
 
     if (deleteCount == 0) {
+      // deleteSurroundingText/commitString are asynchronous at some frontends. 
+      // Queue a following rewrite briefly so an injected
+      // backspace cannot race the surrounding-text update.
+      rewriteState.rewriteLock = true;
       if (!commitText.empty()) {
         ic->commitString(commitText);
       }
@@ -2186,6 +2190,14 @@ private:
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
       rewriteState.allowTransientResetPreserve = true;
+
+      // deleteSurroundingText/commitString are asynchronous at some
+      // frontends. Queue a following rewrite briefly so an injected
+      // backspace cannot race the surrounding-text update.
+      if (!schedulePostCommitPump(ic, state,
+                                  kSurroundingFastPathSettleDelayUsec)) {
+        rewriteState.rewriteLock = false;
+      }
       return true;
     }
 
@@ -2401,8 +2413,8 @@ private:
     }
 
     const auto normalizedKey = queuedKey.normalize();
-    const bool plainSpace = isPlainSpaceKey(queuedKey) ||
-                            isPlainSpaceKey(normalizedKey);
+    const bool plainSpace =
+        isPlainSpaceKey(queuedKey) || isPlainSpaceKey(normalizedKey);
     const uint32_t uni = fcitx::Key::keySymToUnicode(normalizedKey.sym());
     if (plainSpace || (uni >= 0x20 && uni <= 0x7E)) {
       const char c = plainSpace ? ' ' : static_cast<char>(uni);
