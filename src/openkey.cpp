@@ -3030,7 +3030,9 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s,
   if (!normalizedProgram.empty() && it != appModeMap.end() &&
       it->second != RuntimeMode::Auto) {
     const bool hasRewriteServer = rewriteServerAvailable();
-    if (it->second == RuntimeMode::BackspaceRewrite && hasRewriteServer) {
+    if ((it->second == RuntimeMode::BackspaceRewrite ||
+         it->second == RuntimeMode::BackspaceRewriteNoSurr) &&
+        hasRewriteServer) {
       return it->second;
     }
     if (it->second == RuntimeMode::Preedit ||
