@@ -877,7 +877,6 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
   return false;
 }
 
-
 static RewriteTiming backspaceRewriteTimingFor(bool x11,
                                                const OpenKeyState &state) {
 
@@ -1760,8 +1759,17 @@ public:
                          << rewriteState.seenBackspaces;
           }
           if (deps_.remoteScheduleWait) {
-            deps_.remoteScheduleWait(state,
-                                     state.isX11Environment ? 50000 : 30000);
+            bool isSurrValid = ic->capabilityFlags().test(
+                                   fcitx::CapabilityFlag::SurroundingText) &&
+                               ic->surroundingText().isValid();
+            if (deps_.enableSurroundingFastPath &&
+                deps_.enableSurroundingFastPath() && !isSurrValid) {
+              deps_.remoteScheduleWait(state,
+                                       state.isX11Environment ? 40000 : 10000);
+            } else {
+              deps_.remoteScheduleWait(state,
+                                       state.isX11Environment ? 50000 : 30000);
+            }
           }
           event.filterAndAccept();
           return true;
@@ -2386,7 +2394,6 @@ private:
         clearBackspaceSnapshot(rewriteState);
       }
 
-
       if (!adapterShared) {
         clearComposeState(state, "no-adapter");
         return false;
@@ -2991,7 +2998,7 @@ void OpenKeyEngine::reset(const fcitx::InputMethodEntry &,
 
         auto *st = stateFor(ic2);
         auto _timer = st ? std::move(st->lazyResetTimer) : nullptr;
-        
+
         performReset(ic2);
         return false;
       });
