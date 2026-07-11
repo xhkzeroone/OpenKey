@@ -38,6 +38,7 @@ public:
 enum class RuntimeMode {
   Auto,
   BackspaceRewrite,
+  BackspaceRewriteNoSurr,
   Preedit,
   DirectCommit,
   Surrounding,

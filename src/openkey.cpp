@@ -599,6 +599,8 @@ static std::string runtimeModeToString(RuntimeMode mode) {
     return "preedit";
   case RuntimeMode::BackspaceRewrite:
     return "nonPreedit";
+  case RuntimeMode::BackspaceRewriteNoSurr:
+    return "fixNonPreedit";
   case RuntimeMode::DirectCommit:
     return "direct";
   case RuntimeMode::Surrounding:
@@ -619,6 +621,10 @@ static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
   }
   if (equalsASCIIInsensitive(mode, "nonPreedit")) {
     out = RuntimeMode::BackspaceRewrite;
+    return true;
+  }
+  if (equalsASCIIInsensitive(mode, "fixNonPreedit")) {
+    out = RuntimeMode::BackspaceRewriteNoSurr;
     return true;
   }
   if (equalsASCIIInsensitive(mode, "direct")) {
@@ -2153,6 +2159,7 @@ private:
     bool stReliable = false;
     if (!browserAutocomplete && deps_.enableSurroundingFastPath &&
         deps_.enableSurroundingFastPath() &&
+        state.mode != RuntimeMode::BackspaceRewriteNoSurr &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
       const auto &st = ic->surroundingText();
       if (st.isValid()) {
@@ -2564,6 +2571,8 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
       return "Preedit";
     case RuntimeMode::BackspaceRewrite:
       return "Non Preedit";
+    case RuntimeMode::BackspaceRewriteNoSurr:
+      return "Fix Non Preedit";
     case RuntimeMode::DirectCommit:
       return "Direct";
     case RuntimeMode::Surrounding:
@@ -2593,6 +2602,8 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
     return "Preedit";
   case RuntimeMode::BackspaceRewrite:
     return "Non Preedit";
+  case RuntimeMode::BackspaceRewriteNoSurr:
+    return "Fix Non Preedit";
   case RuntimeMode::DirectCommit:
     return "Direct";
   case RuntimeMode::Surrounding:
@@ -3109,6 +3120,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     if (!state->manualMode) {
       nextMode = RuntimeMode::BackspaceRewrite;
     } else if (state->mode == RuntimeMode::BackspaceRewrite) {
+      nextMode = RuntimeMode::BackspaceRewriteNoSurr;
+    } else if (state->mode == RuntimeMode::BackspaceRewriteNoSurr) {
       nextMode = RuntimeMode::Preedit;
     } else if (state->mode == RuntimeMode::Preedit) {
       nextMode = RuntimeMode::Surrounding;
@@ -3168,6 +3181,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
           return "Preedit";
         case RuntimeMode::BackspaceRewrite:
           return "Non Preedit";
+        case RuntimeMode::BackspaceRewriteNoSurr:
+          return "Fix Non Preedit";
         case RuntimeMode::DirectCommit:
           return "Direct";
         case RuntimeMode::Surrounding:
@@ -3273,6 +3288,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     }
     return;
   case RuntimeMode::BackspaceRewrite:
+  case RuntimeMode::BackspaceRewriteNoSurr:
     if (backspaceRewriteHandler_) {
       backspaceRewriteHandler_->handleKey(ic, event, *state);
     }
