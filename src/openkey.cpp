@@ -867,19 +867,6 @@ static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
            !hasNewlineBetween(selectionStart, selectionEnd);
   }
 
-  // Case 2: không selection nhưng sau cursor có text tự mọc thêm.
-  // Giống browser search/address autocomplete.
-  if (cursor < textLen) {
-    const size_t cursorByte = utf8ByteOffsetForCharIndex(text, cursor);
-    if (text.find('\n', cursorByte) != std::string::npos) {
-      return false;
-    }
-
-    // Sau cursor còn ít nhất 2 ký tự thì mới coi là autocomplete,
-    // tránh nhầm khi user sửa giữa từ thường.
-    return textLen >= static_cast<size_t>(cursor) + 2;
-  }
-
   return false;
 }
 
@@ -1774,7 +1761,7 @@ public:
                                        state.isX11Environment ? 40000 : 10000);
             } else {
               deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 50000 : 30000);
+                                       state.isX11Environment ? 40000 : 30000);
             }
           }
           event.filterAndAccept();

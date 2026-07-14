@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <path fill="currentColor" d="M2.2 3.2a1 1 0 0 1 1.3.6L8 13l4.5-9.2a1 1 0 1 1 1.8.9l-5.4 11a1 1 0 0 1-1.8 0l-5.4-11a1 1 0 0 1 .5-1.5z"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <path d="M64 44 L128 206 L192 44"
+        fill="none"
+        stroke="#ff6b6b"
+        stroke-width="56"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
 </svg>
 

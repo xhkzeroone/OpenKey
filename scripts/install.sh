@@ -68,10 +68,27 @@ install_deps_debian() {
   fi
 }
 
+install_deps_arch() {
+  echo "[openkey] Installing build dependencies (pacman)"
+
+  sudo pacman -Sy --needed --noconfirm \
+    base-devel \
+    cmake \
+    pkgconf \
+    extra-cmake-modules \
+    gettext \
+    go \
+    fcitx5 \
+    fcitx5-configtool \
+    fcitx5-gtk \
+    fcitx5-qt
+}
+
 install_build_deps() {
   if [[ "$(uname -s)" != "Linux" ]]; then
     return
   fi
+
   if [[ ! -r /etc/os-release ]]; then
     echo "[openkey] Skipping dependency auto-install: /etc/os-release missing"
     return
@@ -79,10 +96,21 @@ install_build_deps() {
 
   . /etc/os-release
 
+  # Debian / Ubuntu
   if command -v apt-get >/dev/null 2>&1; then
     case " ${ID:-} ${ID_LIKE:-} " in
       *" ubuntu "*|*" debian "*)
         install_deps_debian
+        return
+        ;;
+    esac
+  fi
+
+  # Arch / CachyOS
+  if command -v pacman >/dev/null 2>&1; then
+    case " ${ID:-} ${ID_LIKE:-} " in
+      *" arch "*|*" cachyos "*)
+        install_deps_arch
         return
         ;;
     esac
