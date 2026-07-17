@@ -673,13 +673,11 @@ struct RewriteTiming {
   uint64_t commitDelayUsec = 60000;
 };
 
-static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{1000, 40000};
-static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{
-    1000, 40000};
-static constexpr RewriteTiming kBackspaceRewriteX11Timing{1000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{1000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{1000,
-                                                                       80000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{10000, 20000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{10000, 20000};
+static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 60000};
+static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 60000};
+static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000, 60000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
 static constexpr uint64_t kSurroundingFastPathSettleDelayUsec = 20000;
 
@@ -1758,10 +1756,10 @@ public:
             if (deps_.enableSurroundingFastPath &&
                 deps_.enableSurroundingFastPath() && !isSurrValid) {
               deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 40000 : 10000);
+                                       state.isX11Environment ? 30000 : 10000);
             } else {
               deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 40000 : 30000);
+                                       state.isX11Environment ? 30000 : 10000);
             }
           }
           event.filterAndAccept();
@@ -2189,10 +2187,6 @@ private:
     }
 
     if (deps_.remoteEnabled && deps_.remoteEnabled() && deps_.remoteSchedule) {
-      const uint64_t keysTime = timing.interKeyUsec * (deleteCount + 1);
-      const uint64_t serverCommitDelay = timing.commitDelayUsec > keysTime
-                                             ? timing.commitDelayUsec - keysTime
-                                             : 0;
 
       rewriteState.rewriteLock = true;
       rewriteState.waitingBackspaceAck = true;
@@ -2204,7 +2198,7 @@ private:
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
       if (deps_.remoteSchedule(ic, state, deleteCount, timing.interKeyUsec,
-                               serverCommitDelay)) {
+                               timing.commitDelayUsec)) {
         rewriteState.remoteRewritePending = true;
         return true;
       }
