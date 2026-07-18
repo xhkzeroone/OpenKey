@@ -674,10 +674,12 @@ struct RewriteTiming {
 };
 
 static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{10000, 20000};
-static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{10000, 20000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{
+    10000, 20000};
 static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 60000};
 static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 60000};
-static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000, 60000};
+static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000,
+                                                                       60000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
 static constexpr uint64_t kSurroundingFastPathSettleDelayUsec = 20000;
 
@@ -1396,53 +1398,100 @@ public:
       }
     }
 
-    auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
-    if (!r.handled) {
-      clearState("unhandled_ascii");
-      return false;
-    }
-    if (!fcitx::utf8::validate(r.newWord)) {
-      if (debug) {
-        FCITX_WARN() << "openkey: invalid utf8 from adapter program="
-                     << state.program;
+    std::string tempRaw = state.rollbackRawBuffer;
+    tempRaw.push_back(c);
+    std::string normalizedRaw = deps_.adapter->normalizeRawKeystrokes(tempRaw);
+    if (normalizedRaw != tempRaw) {
+      std::string newWord = deps_.adapter->convertRawBuffer(normalizedRaw);
+      if (!fcitx::utf8::validate(newWord)) {
+        if (debug) {
+          FCITX_WARN() << "openkey: invalid utf8 from adapter program="
+                       << state.program;
+        }
+        clearState("invalid_utf8_newword");
+        return false;
       }
-      clearState("invalid_utf8_newword");
-      return false;
-    }
-
-    const std::size_t prefixLen =
-        commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
-    const unsigned int deleteChars =
-        utf8CharCount(state.rollbackDisplay.substr(prefixLen));
-    if (deleteChars > 128) {
+      const std::size_t prefixLen =
+          commonPrefixBytesUTF8Boundary(state.rollbackDisplay, newWord);
+      const unsigned int deleteChars =
+          utf8CharCount(state.rollbackDisplay.substr(prefixLen));
+      if (deleteChars > 128) {
+        if (debug) {
+          FCITX_WARN() << "openkey: deleteChars too large program="
+                       << state.program << " deleteChars=" << deleteChars
+                       << " rollbackDisplay=" << state.rollbackDisplay
+                       << " newWord=" << newWord;
+        }
+        clearState("apply_delete_too_large");
+        return false;
+      }
+      if (deleteChars > 0) {
+        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+      }
+      if (newWord.size() > prefixLen) {
+        ic->commitString(newWord.substr(prefixLen));
+      }
       if (debug) {
-        FCITX_WARN() << "openkey: deleteChars too large program="
-                     << state.program << " deleteChars=" << deleteChars
-                     << " rollbackDisplay=" << state.rollbackDisplay
+        FCITX_INFO() << "openkey: st apply program=" << state.program
+                     << " deleteChars=" << deleteChars
+                     << " commitDelta=" << newWord.substr(prefixLen)
+                     << " newWord=" << newWord;
+      }
+      state.rollbackWord = newWord;
+      state.rollbackDisplay = newWord;
+      state.rollbackRawBuffer = std::move(normalizedRaw);
+      state.lastCommitted = state.rollbackDisplay;
+      event.filterAndAccept();
+      return true;
+    } else {
+      auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
+      if (!r.handled) {
+        clearState("unhandled_ascii");
+        return false;
+      }
+      if (!fcitx::utf8::validate(r.newWord)) {
+        if (debug) {
+          FCITX_WARN() << "openkey: invalid utf8 from adapter program="
+                       << state.program;
+        }
+        clearState("invalid_utf8_newword");
+        return false;
+      }
+
+      const std::size_t prefixLen =
+          commonPrefixBytesUTF8Boundary(state.rollbackDisplay, r.newWord);
+      const unsigned int deleteChars =
+          utf8CharCount(state.rollbackDisplay.substr(prefixLen));
+      if (deleteChars > 128) {
+        if (debug) {
+          FCITX_WARN() << "openkey: deleteChars too large program="
+                       << state.program << " deleteChars=" << deleteChars
+                       << " rollbackDisplay=" << state.rollbackDisplay
+                       << " newWord=" << r.newWord;
+        }
+        clearState("apply_delete_too_large");
+        return false;
+      }
+      if (deleteChars > 0) {
+        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+      }
+      if (r.newWord.size() > prefixLen) {
+        ic->commitString(r.newWord.substr(prefixLen));
+      }
+      if (debug) {
+        FCITX_INFO() << "openkey: st apply program=" << state.program
+                     << " deleteChars=" << deleteChars
+                     << " commitDelta=" << r.newWord.substr(prefixLen)
                      << " newWord=" << r.newWord;
       }
-      clearState("apply_delete_too_large");
-      return false;
-    }
-    if (deleteChars > 0) {
-      ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-    }
-    if (r.newWord.size() > prefixLen) {
-      ic->commitString(r.newWord.substr(prefixLen));
-    }
-    if (debug) {
-      FCITX_INFO() << "openkey: st apply program=" << state.program
-                   << " deleteChars=" << deleteChars
-                   << " commitDelta=" << r.newWord.substr(prefixLen)
-                   << " newWord=" << r.newWord;
-    }
 
-    state.rollbackWord = r.newWord;
-    state.rollbackDisplay = r.newWord;
-    state.rollbackRawBuffer.push_back(c);
-    state.lastCommitted = state.rollbackDisplay;
-    event.filterAndAccept();
-    return true;
+      state.rollbackWord = r.newWord;
+      state.rollbackDisplay = r.newWord;
+      state.rollbackRawBuffer.push_back(c);
+      state.lastCommitted = state.rollbackDisplay;
+      event.filterAndAccept();
+      return true;
+    }
   }
 
   void reset(OpenKeyState &state) override {
@@ -1642,12 +1691,21 @@ public:
         return false;
       }
 
-      auto r = deps_.adapter->processAsciiKey(state.composing, c);
-      if (!r.handled) {
-        return false;
+      std::string tempRaw = state.preeditKeyBuffer;
+      tempRaw.push_back(c);
+      std::string normalizedRaw =
+          deps_.adapter->normalizeRawKeystrokes(tempRaw);
+      if (normalizedRaw != tempRaw) {
+        state.composing = deps_.adapter->convertRawBuffer(normalizedRaw);
+        state.preeditKeyBuffer = std::move(normalizedRaw);
+      } else {
+        auto r = deps_.adapter->processAsciiKey(state.composing, c);
+        if (!r.handled) {
+          return false;
+        }
+        state.composing = std::move(r.newWord);
+        state.preeditKeyBuffer.push_back(c);
       }
-      state.composing = std::move(r.newWord);
-      state.preeditKeyBuffer.push_back(c);
       updatePreeditUI(ic, state);
       event.filterAndAccept();
       return true;
@@ -2387,13 +2445,24 @@ private:
         return false;
       }
       adapterShared->setCodeTable(state.codeTable);
-      const auto r = adapterShared->processAsciiKey(rewriteState.shownText, c);
-      if (!r.handled) {
-        clearComposeState(state, "adapter-not-handled");
-        return false;
+      std::string tempRaw = rewriteState.rawAsciiBuffer;
+      tempRaw.push_back(c);
+      std::string normalizedRaw =
+          adapterShared->normalizeRawKeystrokes(tempRaw);
+      if (normalizedRaw != tempRaw) {
+        std::string newWord = adapterShared->convertRawBuffer(normalizedRaw);
+        rewriteState.rawAsciiBuffer = std::move(normalizedRaw);
+        return applyWordDelta(ic, state, debug, newWord, c, "ascii");
+      } else {
+        const auto r =
+            adapterShared->processAsciiKey(rewriteState.shownText, c);
+        if (!r.handled) {
+          clearComposeState(state, "adapter-not-handled");
+          return false;
+        }
+        rewriteState.rawAsciiBuffer.push_back(c);
+        return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
       }
-      rewriteState.rawAsciiBuffer.push_back(c);
-      return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
     }
 
     clearComposeState(state, "non-ascii-key");
