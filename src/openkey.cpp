@@ -43,7 +43,6 @@
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
-#include <fcitx/menu.h>
 #include <fcitx/statusarea.h>
 #include <fcitx/text.h>
 #include <fcitx/userinterfacemanager.h>
@@ -2644,9 +2643,6 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
 OpenKeyEngine::~OpenKeyEngine() {
   if (instance_) {
     auto &uiManager = instance_->userInterfaceManager();
-    if (modeMenuAction_) {
-      uiManager.unregisterAction(modeMenuAction_.get());
-    }
     if (modeAutoAction_) {
       uiManager.unregisterAction(modeAutoAction_.get());
     }
@@ -2666,14 +2662,12 @@ OpenKeyEngine::~OpenKeyEngine() {
       uiManager.unregisterAction(modeDirectAction_.get());
     }
   }
-  modeMenuAction_.reset();
   modeAutoAction_.reset();
   modeNonPreeditAction_.reset();
   modeFixNonPreeditAction_.reset();
   modePreeditAction_.reset();
   modeSurroundingAction_.reset();
   modeDirectAction_.reset();
-  modeMenu_.reset();
   focusedAppBridge_.reset();
   remoteRewriteCoordinator_.reset();
   adapter_.reset();
@@ -3205,12 +3199,6 @@ RuntimeMode OpenKeyEngine::firstManualMode() const {
 }
 
 void OpenKeyEngine::setupModeMenuActions() {
-  modeMenu_ = std::make_unique<fcitx::Menu>();
-  modeMenuAction_ = std::make_unique<fcitx::SimpleAction>();
-  modeMenuAction_->setShortText("Chế độ gõ");
-  modeMenuAction_->setIcon("fcitx-openkey");
-  modeMenuAction_->setMenu(modeMenu_.get());
-
   auto makeModeAction = [this](const std::string &name,
                                const std::string &label, RuntimeMode mode) {
     auto action = std::make_unique<fcitx::SimpleAction>();
@@ -3221,7 +3209,6 @@ void OpenKeyEngine::setupModeMenuActions() {
     if (instance_) {
       instance_->userInterfaceManager().registerAction(name, action.get());
     }
-    modeMenu_->addAction(action.get());
     return action;
   };
 
@@ -3238,19 +3225,23 @@ void OpenKeyEngine::setupModeMenuActions() {
       "openkey-mode-surrounding", "Surrounding", RuntimeMode::Surrounding);
   modeDirectAction_ = makeModeAction("openkey-mode-direct", "Direct",
                                      RuntimeMode::DirectCommit);
-
-  if (instance_) {
-    instance_->userInterfaceManager().registerAction("openkey-mode-menu",
-                                                     modeMenuAction_.get());
-  }
 }
 
 void OpenKeyEngine::addModeMenuToStatusArea(fcitx::InputContext *ic) {
-  if (!ic || !modeMenuAction_) {
+  if (!ic || !modeAutoAction_) {
     return;
   }
-  ic->statusArea().addAction(fcitx::StatusGroup::InputMethod,
-                             modeMenuAction_.get());
+  auto &statusArea = ic->statusArea();
+  statusArea.addAction(fcitx::StatusGroup::InputMethod, modeAutoAction_.get());
+  statusArea.addAction(fcitx::StatusGroup::InputMethod,
+                       modeNonPreeditAction_.get());
+  statusArea.addAction(fcitx::StatusGroup::InputMethod,
+                       modeFixNonPreeditAction_.get());
+  statusArea.addAction(fcitx::StatusGroup::InputMethod,
+                       modePreeditAction_.get());
+  statusArea.addAction(fcitx::StatusGroup::InputMethod,
+                       modeSurroundingAction_.get());
+  statusArea.addAction(fcitx::StatusGroup::InputMethod, modeDirectAction_.get());
   refreshModeMenu(ic);
 }
 
@@ -3322,7 +3313,6 @@ void OpenKeyEngine::refreshModeMenu(fcitx::InputContext *ic) {
   modePreeditAction_->update(ic);
   modeSurroundingAction_->update(ic);
   modeDirectAction_->update(ic);
-  modeMenuAction_->update(ic);
 }
 
 void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,

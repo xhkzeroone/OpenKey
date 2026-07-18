@@ -18,7 +18,6 @@
 
 namespace fcitx {
 class Instance;
-class Menu;
 class SimpleAction;
 }
 
@@ -186,8 +185,6 @@ private:
   std::unique_ptr<InputModeHandler> preeditHandler_;
   std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
   std::unique_ptr<InputModeHandler> surroundingHandler_;
-  std::unique_ptr<fcitx::Menu> modeMenu_;
-  std::unique_ptr<fcitx::SimpleAction> modeMenuAction_;
   std::unique_ptr<fcitx::SimpleAction> modeAutoAction_;
   std::unique_ptr<fcitx::SimpleAction> modeNonPreeditAction_;
   std::unique_ptr<fcitx::SimpleAction> modeFixNonPreeditAction_;
