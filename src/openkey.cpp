@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <fcitx-config/iniparser.h>
+#include <fcitx/action.h>
 #include <fcitx-utils/dbus/bus.h>
 #include <fcitx-utils/eventdispatcher.h>
 #include <fcitx-utils/key.h>
@@ -42,7 +43,10 @@
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
+#include <fcitx/menu.h>
+#include <fcitx/statusarea.h>
 #include <fcitx/text.h>
+#include <fcitx/userinterfacemanager.h>
 
 #include "Macro.h"
 #include "openkey_adapter.h"
@@ -2627,6 +2631,7 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
   preeditHandler_ = std::make_unique<PreeditModeHandler>(simpleDeps);
   surroundingHandler_ =
       std::make_unique<SurroundingModeHandler>(std::move(simpleDeps));
+  setupModeMenuActions();
   reloadConfig();
   if (remoteRewriteCoordinator_) {
     remoteRewriteCoordinator_->ensureAvailableOrStartOnce();
@@ -2637,6 +2642,38 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
 }
 
 OpenKeyEngine::~OpenKeyEngine() {
+  if (instance_) {
+    auto &uiManager = instance_->userInterfaceManager();
+    if (modeMenuAction_) {
+      uiManager.unregisterAction(modeMenuAction_.get());
+    }
+    if (modeAutoAction_) {
+      uiManager.unregisterAction(modeAutoAction_.get());
+    }
+    if (modeNonPreeditAction_) {
+      uiManager.unregisterAction(modeNonPreeditAction_.get());
+    }
+    if (modeFixNonPreeditAction_) {
+      uiManager.unregisterAction(modeFixNonPreeditAction_.get());
+    }
+    if (modePreeditAction_) {
+      uiManager.unregisterAction(modePreeditAction_.get());
+    }
+    if (modeSurroundingAction_) {
+      uiManager.unregisterAction(modeSurroundingAction_.get());
+    }
+    if (modeDirectAction_) {
+      uiManager.unregisterAction(modeDirectAction_.get());
+    }
+  }
+  modeMenuAction_.reset();
+  modeAutoAction_.reset();
+  modeNonPreeditAction_.reset();
+  modeFixNonPreeditAction_.reset();
+  modePreeditAction_.reset();
+  modeSurroundingAction_.reset();
+  modeDirectAction_.reset();
+  modeMenu_.reset();
   focusedAppBridge_.reset();
   remoteRewriteCoordinator_.reset();
   adapter_.reset();
@@ -2984,6 +3021,7 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
   state->mode = decideMode(ic, *state);
   state->autoMode = state->mode;
   state->modeDecided = true;
+  addModeMenuToStatusArea(ic);
 
   ic->inputPanel().reset();
   ic->updatePreedit();
@@ -3166,6 +3204,127 @@ RuntimeMode OpenKeyEngine::firstManualMode() const {
   return RuntimeMode::BackspaceRewrite;
 }
 
+void OpenKeyEngine::setupModeMenuActions() {
+  modeMenu_ = std::make_unique<fcitx::Menu>();
+  modeMenuAction_ = std::make_unique<fcitx::SimpleAction>();
+  modeMenuAction_->setShortText("Chế độ gõ");
+  modeMenuAction_->setIcon("fcitx-openkey");
+  modeMenuAction_->setMenu(modeMenu_.get());
+
+  auto makeModeAction = [this](const std::string &name,
+                               const std::string &label, RuntimeMode mode) {
+    auto action = std::make_unique<fcitx::SimpleAction>();
+    action->setShortText(label);
+    action->setCheckable(true);
+    action->connect<fcitx::SimpleAction::Activated>(
+        [this, mode](fcitx::InputContext *ic) { setModeFromMenu(ic, mode); });
+    if (instance_) {
+      instance_->userInterfaceManager().registerAction(name, action.get());
+    }
+    modeMenu_->addAction(action.get());
+    return action;
+  };
+
+  modeAutoAction_ =
+      makeModeAction("openkey-mode-auto", "Auto", RuntimeMode::Auto);
+  modeNonPreeditAction_ = makeModeAction(
+      "openkey-mode-nonpreedit", "Non Preedit", RuntimeMode::BackspaceRewrite);
+  modeFixNonPreeditAction_ =
+      makeModeAction("openkey-mode-fix-nonpreedit", "Fix Non Preedit",
+                     RuntimeMode::BackspaceRewriteNoSurr);
+  modePreeditAction_ =
+      makeModeAction("openkey-mode-preedit", "Preedit", RuntimeMode::Preedit);
+  modeSurroundingAction_ = makeModeAction(
+      "openkey-mode-surrounding", "Surrounding", RuntimeMode::Surrounding);
+  modeDirectAction_ = makeModeAction("openkey-mode-direct", "Direct",
+                                     RuntimeMode::DirectCommit);
+
+  if (instance_) {
+    instance_->userInterfaceManager().registerAction("openkey-mode-menu",
+                                                     modeMenuAction_.get());
+  }
+}
+
+void OpenKeyEngine::addModeMenuToStatusArea(fcitx::InputContext *ic) {
+  if (!ic || !modeMenuAction_) {
+    return;
+  }
+  ic->statusArea().addAction(fcitx::StatusGroup::InputMethod,
+                             modeMenuAction_.get());
+  refreshModeMenu(ic);
+}
+
+void OpenKeyEngine::setModeFromMenu(fcitx::InputContext *ic,
+                                    RuntimeMode mode) {
+  if (!ic) {
+    return;
+  }
+  auto *state = stateFor(ic);
+  if (!state) {
+    return;
+  }
+  if (mode == RuntimeMode::DirectCommit &&
+      ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
+    return;
+  }
+
+  state->rewriteState.clear();
+  state->composing.clear();
+  state->preeditKeyBuffer.clear();
+
+  if (mode == RuntimeMode::Auto) {
+    state->manualMode = false;
+    state->mode = state->autoMode;
+    state->modeDecided = true;
+  } else {
+    state->manualMode = true;
+    state->mode = mode;
+    state->modeDecided = true;
+  }
+
+  if (!state->program.empty()) {
+    setAppModeForProgram(ic, state->program, mode);
+    persistAppModes();
+  }
+
+  ic->inputPanel().reset();
+  ic->updatePreedit();
+  ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel, true);
+  refreshModeMenu(ic);
+  if (instance_) {
+    instance_->showInputMethodInformation(ic);
+  }
+}
+
+void OpenKeyEngine::refreshModeMenu(fcitx::InputContext *ic) {
+  if (!ic || !modeAutoAction_) {
+    return;
+  }
+  auto *state = stateFor(ic);
+  if (!state) {
+    return;
+  }
+  modeAutoAction_->setChecked(!state->manualMode);
+  modeNonPreeditAction_->setChecked(
+      state->manualMode && state->mode == RuntimeMode::BackspaceRewrite);
+  modeFixNonPreeditAction_->setChecked(
+      state->manualMode && state->mode == RuntimeMode::BackspaceRewriteNoSurr);
+  modePreeditAction_->setChecked(state->manualMode &&
+                                 state->mode == RuntimeMode::Preedit);
+  modeSurroundingAction_->setChecked(state->manualMode &&
+                                     state->mode == RuntimeMode::Surrounding);
+  modeDirectAction_->setChecked(state->manualMode &&
+                                state->mode == RuntimeMode::DirectCommit);
+
+  modeAutoAction_->update(ic);
+  modeNonPreeditAction_->update(ic);
+  modeFixNonPreeditAction_->update(ic);
+  modePreeditAction_->update(ic);
+  modeSurroundingAction_->update(ic);
+  modeDirectAction_->update(ic);
+  modeMenuAction_->update(ic);
+}
+
 void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                              fcitx::KeyEvent &event) {
   auto *ic = event.inputContext();
@@ -3256,6 +3415,7 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
                    << " mode=" << static_cast<int>(state->mode);
     }
     clearComposingState();
+    refreshModeMenu(ic);
     if (instance_) {
       instance_->showInputMethodInformation(ic);
     }

@@ -18,6 +18,8 @@
 
 namespace fcitx {
 class Instance;
+class Menu;
+class SimpleAction;
 }
 
 namespace openkey {
@@ -184,6 +186,14 @@ private:
   std::unique_ptr<InputModeHandler> preeditHandler_;
   std::unique_ptr<InputModeHandler> backspaceRewriteHandler_;
   std::unique_ptr<InputModeHandler> surroundingHandler_;
+  std::unique_ptr<fcitx::Menu> modeMenu_;
+  std::unique_ptr<fcitx::SimpleAction> modeMenuAction_;
+  std::unique_ptr<fcitx::SimpleAction> modeAutoAction_;
+  std::unique_ptr<fcitx::SimpleAction> modeNonPreeditAction_;
+  std::unique_ptr<fcitx::SimpleAction> modeFixNonPreeditAction_;
+  std::unique_ptr<fcitx::SimpleAction> modePreeditAction_;
+  std::unique_ptr<fcitx::SimpleAction> modeSurroundingAction_;
+  std::unique_ptr<fcitx::SimpleAction> modeDirectAction_;
 
   // Lưu lại thời điểm gõ phím cuối cùng toàn cục (tránh bị reset khi app gọi activate liên tục)
   uint64_t lastKeyTime_ = 0;
@@ -205,6 +215,10 @@ private:
   RuntimeMode decideMode(fcitx::InputContext *ic, OpenKeyState &state,
                          bool writeBack = true);
   RuntimeMode firstManualMode() const;
+  void setupModeMenuActions();
+  void addModeMenuToStatusArea(fcitx::InputContext *ic);
+  void setModeFromMenu(fcitx::InputContext *ic, RuntimeMode mode);
+  void refreshModeMenu(fcitx::InputContext *ic);
   bool scheduleRemoteRewrite(fcitx::InputContext *ic, OpenKeyState &state,
                              unsigned int deleteCount,
                              uint64_t interBackspaceUsec,
