@@ -14,543 +14,633 @@ namespace openkey {
 namespace {
 
 static uint32_t markMaskFromIndex(int idx) {
-    switch (idx) {
-    case 0:
-        return MARK1_MASK;
-    case 1:
-        return MARK2_MASK;
-    case 2:
-        return MARK3_MASK;
-    case 3:
-        return MARK4_MASK;
-    case 4:
-        return MARK5_MASK;
-    default:
-        return 0;
-    }
+  switch (idx) {
+  case 0:
+    return MARK1_MASK;
+  case 1:
+    return MARK2_MASK;
+  case 2:
+    return MARK3_MASK;
+  case 3:
+    return MARK4_MASK;
+  case 4:
+    return MARK5_MASK;
+  default:
+    return 0;
+  }
 }
 
 static bool isAsciiHandled(char c) {
-    // Vietnamese.cpp defines _characterMap as map<Uint32, Uint32>.
-    return _characterMap.find(static_cast<uint32_t>(static_cast<unsigned char>(c))) !=
-           _characterMap.end();
+  // Vietnamese.cpp defines _characterMap as map<Uint32, Uint32>.
+  return _characterMap.find(static_cast<uint32_t>(
+             static_cast<unsigned char>(c))) != _characterMap.end();
 }
 
 } // namespace
 
 OpenKeyAdapter::OpenKeyAdapter() {
-    resetCoreState();
-    ensureReverseMap();
+  resetCoreState();
+  ensureReverseMap();
 }
 
 void OpenKeyAdapter::resetCoreState() const {
-    hookState_ = static_cast<const vKeyHookState *>(vKeyInit());
-    vSetCurrentWord(nullptr, 0);
+  hookState_ = static_cast<const vKeyHookState *>(vKeyInit());
+  vSetCurrentWord(nullptr, 0);
 }
 
 void OpenKeyAdapter::setInputType(int inputType) { vInputType = inputType; }
-void OpenKeyAdapter::setFreeMark(bool freeMark) { vFreeMark = freeMark ? 1 : 0; }
+void OpenKeyAdapter::setFreeMark(bool freeMark) {
+  vFreeMark = freeMark ? 1 : 0;
+}
 void OpenKeyAdapter::setCodeTable(int codeTable) {
-    if (vCodeTable == codeTable) {
-        return;
-    }
-    vCodeTable = codeTable;
-    legacyToUnicodeTable_ = -1;
-    legacyToUnicode_.clear();
-    // Macro content codes depend on current table.
-    onTableCodeChange();
+  if (vCodeTable == codeTable) {
+    return;
+  }
+  vCodeTable = codeTable;
+  legacyToUnicodeTable_ = -1;
+  legacyToUnicode_.clear();
+  // Macro content codes depend on current table.
+  onTableCodeChange();
 }
 void OpenKeyAdapter::setCheckSpelling(bool checkSpelling) {
-    vCheckSpelling = checkSpelling ? 1 : 0;
-    vSetCheckSpelling();
+  vCheckSpelling = checkSpelling ? 1 : 0;
+  vSetCheckSpelling();
 }
 void OpenKeyAdapter::setUseModernOrthography(bool enabled) {
-    vUseModernOrthography = enabled ? 1 : 0;
+  vUseModernOrthography = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setLiteralWAtWordStart(bool enabled) {
-    literalWAtWordStart_ = enabled;
+  literalWAtWordStart_ = enabled;
 }
-void OpenKeyAdapter::setQuickTelex(bool enabled) { vQuickTelex = enabled ? 1 : 0; }
+void OpenKeyAdapter::setQuickTelex(bool enabled) {
+  vQuickTelex = enabled ? 1 : 0;
+}
 void OpenKeyAdapter::setRestoreIfWrongSpelling(bool enabled) {
-    vRestoreIfWrongSpelling = enabled ? 1 : 0;
+  vRestoreIfWrongSpelling = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setUpperCaseFirstChar(bool enabled) {
-    vUpperCaseFirstChar = enabled ? 1 : 0;
+  vUpperCaseFirstChar = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setAllowConsonantZFWJ(bool enabled) {
-    vAllowConsonantZFWJ = enabled ? 1 : 0;
+  vAllowConsonantZFWJ = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setQuickStartConsonant(bool enabled) {
-    vQuickStartConsonant = enabled ? 1 : 0;
+  vQuickStartConsonant = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setQuickEndConsonant(bool enabled) {
-    vQuickEndConsonant = enabled ? 1 : 0;
+  vQuickEndConsonant = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setUseMacro(bool enabled) { vUseMacro = enabled ? 1 : 0; }
 void OpenKeyAdapter::setUseMacroInEnglishMode(bool enabled) {
-    vUseMacroInEnglishMode = enabled ? 1 : 0;
+  vUseMacroInEnglishMode = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setAutoCapsMacro(bool enabled) {
-    vAutoCapsMacro = enabled ? 1 : 0;
+  vAutoCapsMacro = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setUseSmartSwitchKey(bool enabled) {
-    vUseSmartSwitchKey = enabled ? 1 : 0;
+  vUseSmartSwitchKey = enabled ? 1 : 0;
 }
-void OpenKeyAdapter::setRememberCode(bool enabled) { vRememberCode = enabled ? 1 : 0; }
-void OpenKeyAdapter::setOtherLanguage(bool enabled) { vOtherLanguage = enabled ? 1 : 0; }
+void OpenKeyAdapter::setRememberCode(bool enabled) {
+  vRememberCode = enabled ? 1 : 0;
+}
+void OpenKeyAdapter::setOtherLanguage(bool enabled) {
+  vOtherLanguage = enabled ? 1 : 0;
+}
 void OpenKeyAdapter::setTempOffSpelling(bool enabled) {
-    vTempOffSpelling = enabled ? 1 : 0;
+  vTempOffSpelling = enabled ? 1 : 0;
 }
 void OpenKeyAdapter::setTempOffOpenKey(bool enabled) {
-    vTempOffOpenKey = enabled ? 1 : 0;
+  vTempOffOpenKey = enabled ? 1 : 0;
 }
 
 void OpenKeyAdapter::ensureReverseMap() {
-    if (!unicodeToInternal_.empty()) {
-        return;
-    }
+  if (!unicodeToInternal_.empty()) {
+    return;
+  }
 
-    // Build reverse map from Unicode precomposed (codeTable=0) to OpenKey
-    // internal TypingWord encoding.
-    for (const auto &kv : _codeTable[0]) {
-        const uint32_t internalKey = kv.first;
-        const auto &vec = kv.second;
-        for (size_t idx = 0; idx < vec.size(); idx++) {
-            const uint16_t uni16 = vec[idx];
-            if (!uni16) {
-                continue;
-            }
+  // Build reverse map from Unicode precomposed (codeTable=0) to OpenKey
+  // internal TypingWord encoding.
+  for (const auto &kv : _codeTable[0]) {
+    const uint32_t internalKey = kv.first;
+    const auto &vec = kv.second;
+    for (size_t idx = 0; idx < vec.size(); idx++) {
+      const uint16_t uni16 = vec[idx];
+      if (!uni16) {
+        continue;
+      }
 
-            const bool isCaps = (idx % 2 == 0);
-            const uint32_t capsMask = isCaps ? CAPS_MASK : 0;
+      const bool isCaps = (idx % 2 == 0);
+      const uint32_t capsMask = isCaps ? CAPS_MASK : 0;
 
-            uint32_t internal = 0;
-            if ((internalKey & CHAR_MASK) == KEY_D && vec.size() == 2) {
-                // OpenKey represents Đ/đ as KEY_D with TONE_MASK.
-                internal = KEY_D | TONE_MASK | capsMask;
-            } else if (vec.size() == 14 &&
-                       ((internalKey & CHAR_MASK) == KEY_A ||
-                        (internalKey & CHAR_MASK) == KEY_O ||
-                        (internalKey & CHAR_MASK) == KEY_U ||
-                        (internalKey & CHAR_MASK) == KEY_E)) {
-                const uint32_t baseKey = (internalKey & CHAR_MASK);
-                if (idx < 4) {
-                    // 0..3: ^ and w variants (CAPS/NORMAL pairs).
-                    const bool isTone = (idx < 2);
-                    internal = baseKey | (isTone ? TONE_MASK : TONEW_MASK) |
-                               capsMask;
-                } else {
-                    // 4..13: mark variants without ^/w.
-                    const int markIdx = static_cast<int>((idx - 4) / 2);
-                    const uint32_t markMask = markMaskFromIndex(markIdx);
-                    internal = baseKey | markMask | capsMask;
-                }
-            } else if (vec.size() == 10) {
-                // mark variants for: A/O/U/E with tone flags (Â/Ă/Ơ/Ư/Ê...)
-                // or I/Y marks.
-                const int markIdx = static_cast<int>(idx / 2);
-                const uint32_t markMask = markMaskFromIndex(markIdx);
-                internal = internalKey | markMask | capsMask;
-            } else {
-                // Fallback: keep as pure unicode (should be word break anyway).
-                continue;
-            }
-
-            unicodeToInternal_[static_cast<uint32_t>(uni16)] = internal;
+      uint32_t internal = 0;
+      if ((internalKey & CHAR_MASK) == KEY_D && vec.size() == 2) {
+        // OpenKey represents Đ/đ as KEY_D with TONE_MASK.
+        internal = KEY_D | TONE_MASK | capsMask;
+      } else if (vec.size() == 14 && ((internalKey & CHAR_MASK) == KEY_A ||
+                                      (internalKey & CHAR_MASK) == KEY_O ||
+                                      (internalKey & CHAR_MASK) == KEY_U ||
+                                      (internalKey & CHAR_MASK) == KEY_E)) {
+        const uint32_t baseKey = (internalKey & CHAR_MASK);
+        if (idx < 4) {
+          // 0..3: ^ and w variants (CAPS/NORMAL pairs).
+          const bool isTone = (idx < 2);
+          internal = baseKey | (isTone ? TONE_MASK : TONEW_MASK) | capsMask;
+        } else {
+          // 4..13: mark variants without ^/w.
+          const int markIdx = static_cast<int>((idx - 4) / 2);
+          const uint32_t markMask = markMaskFromIndex(markIdx);
+          internal = baseKey | markMask | capsMask;
         }
+      } else if (vec.size() == 10) {
+        // mark variants for: A/O/U/E with tone flags (Â/Ă/Ơ/Ư/Ê...)
+        // or I/Y marks.
+        const int markIdx = static_cast<int>(idx / 2);
+        const uint32_t markMask = markMaskFromIndex(markIdx);
+        internal = internalKey | markMask | capsMask;
+      } else {
+        // Fallback: keep as pure unicode (should be word break anyway).
+        continue;
+      }
+
+      unicodeToInternal_[static_cast<uint32_t>(uni16)] = internal;
     }
+  }
 }
 
 void OpenKeyAdapter::ensureLegacyToUnicodeMap() const {
-    if (vCodeTable == 0) {
-        legacyToUnicode_.clear();
-        legacyToUnicodeTable_ = 0;
-        return;
-    }
-    if (legacyToUnicodeTable_ == vCodeTable && !legacyToUnicode_.empty()) {
-        return;
-    }
-    legacyToUnicodeTable_ = vCodeTable;
+  if (vCodeTable == 0) {
     legacyToUnicode_.clear();
+    legacyToUnicodeTable_ = 0;
+    return;
+  }
+  if (legacyToUnicodeTable_ == vCodeTable && !legacyToUnicode_.empty()) {
+    return;
+  }
+  legacyToUnicodeTable_ = vCodeTable;
+  legacyToUnicode_.clear();
 
-    const auto &legacy = _codeTable[vCodeTable];
-    const auto &unicode = _codeTable[0];
-    for (const auto &kv : legacy) {
-        auto itU = unicode.find(kv.first);
-        if (itU == unicode.end()) {
-            continue;
-        }
-        const auto &legacyVec = kv.second;
-        const auto &uniVec = itU->second;
-        const size_t n = std::min(legacyVec.size(), uniVec.size());
-        for (size_t idx = 0; idx < n; idx++) {
-            const uint16_t legacyCode = legacyVec[idx];
-            const uint16_t unicodeCode = uniVec[idx];
-            if (!legacyCode || !unicodeCode) {
-                continue;
-            }
-            legacyToUnicode_.emplace(legacyCode, unicodeCode);
-        }
+  const auto &legacy = _codeTable[vCodeTable];
+  const auto &unicode = _codeTable[0];
+  for (const auto &kv : legacy) {
+    auto itU = unicode.find(kv.first);
+    if (itU == unicode.end()) {
+      continue;
     }
+    const auto &legacyVec = kv.second;
+    const auto &uniVec = itU->second;
+    const size_t n = std::min(legacyVec.size(), uniVec.size());
+    for (size_t idx = 0; idx < n; idx++) {
+      const uint16_t legacyCode = legacyVec[idx];
+      const uint16_t unicodeCode = uniVec[idx];
+      if (!legacyCode || !unicodeCode) {
+        continue;
+      }
+      legacyToUnicode_.emplace(legacyCode, unicodeCode);
+    }
+  }
 }
 
 std::vector<uint32_t>
 OpenKeyAdapter::encodeWordToInternal(const std::string &word) const {
-    std::vector<uint32_t> result;
-    if (!fcitx::utf8::validate(word)) {
-        return result;
-    }
-    for (auto it = fcitx::utf8::UTF8CharIterator(word.begin(), word.end()),
-              end = fcitx::utf8::UTF8CharIterator(word.end(), word.end());
-         it != end; ++it) {
-        const uint32_t cp = *it;
-        if (cp <= 0x7F) {
-            const char c = static_cast<char>(cp);
-            auto iter = _characterMap.find(static_cast<uint32_t>(
-                static_cast<unsigned char>(c)));
-            if (iter != _characterMap.end()) {
-                result.push_back(iter->second);
-                continue;
-            }
-        }
-        auto iter = unicodeToInternal_.find(cp);
-        if (iter != unicodeToInternal_.end()) {
-            result.push_back(iter->second);
-            continue;
-        }
-        // Stop at unsupported character; caller should treat word boundary.
-        result.clear();
-        return result;
-    }
+  std::vector<uint32_t> result;
+  if (!fcitx::utf8::validate(word)) {
     return result;
+  }
+  for (auto it = fcitx::utf8::UTF8CharIterator(word.begin(), word.end()),
+            end = fcitx::utf8::UTF8CharIterator(word.end(), word.end());
+       it != end; ++it) {
+    const uint32_t cp = *it;
+    if (cp <= 0x7F) {
+      const char c = static_cast<char>(cp);
+      auto iter = _characterMap.find(
+          static_cast<uint32_t>(static_cast<unsigned char>(c)));
+      if (iter != _characterMap.end()) {
+        result.push_back(iter->second);
+        continue;
+      }
+    }
+    auto iter = unicodeToInternal_.find(cp);
+    if (iter != unicodeToInternal_.end()) {
+      result.push_back(iter->second);
+      continue;
+    }
+    // Stop at unsupported character; caller should treat word boundary.
+    result.clear();
+    return result;
+  }
+  return result;
 }
 
 std::string OpenKeyAdapter::engineCodeToUTF8(uint32_t code) const {
-    if (code & PURE_CHARACTER_MASK) {
-        const uint32_t cp = (code & ~PURE_CHARACTER_MASK);
-        return fcitx::utf8::UCS4ToUTF8(cp);
+  if (code & PURE_CHARACTER_MASK) {
+    const uint32_t cp = (code & ~PURE_CHARACTER_MASK);
+    return fcitx::utf8::UCS4ToUTF8(cp);
+  }
+  if (code & CHAR_CODE_MASK) {
+    uint32_t cp = (code & CHAR_MASK);
+    if (vCodeTable != 0) {
+      ensureLegacyToUnicodeMap();
+      auto it = legacyToUnicode_.find(static_cast<uint16_t>(cp));
+      if (it != legacyToUnicode_.end()) {
+        cp = it->second;
+      }
     }
-    if (code & CHAR_CODE_MASK) {
-        uint32_t cp = (code & CHAR_MASK);
-        if (vCodeTable != 0) {
-            ensureLegacyToUnicodeMap();
-            auto it = legacyToUnicode_.find(static_cast<uint16_t>(cp));
-            if (it != legacyToUnicode_.end()) {
-                cp = it->second;
-            }
-        }
-        return fcitx::utf8::UCS4ToUTF8(cp);
-    }
+    return fcitx::utf8::UCS4ToUTF8(cp);
+  }
 
-    // Key code path (unconverted character).
-    const uint32_t keyCode = code & (CHAR_MASK | CAPS_MASK);
-    const uint16_t ch = keyCodeToCharacter(keyCode);
-    if (!ch) {
-        return {};
-    }
-    return fcitx::utf8::UCS4ToUTF8(ch);
+  // Key code path (unconverted character).
+  const uint32_t keyCode = code & (CHAR_MASK | CAPS_MASK);
+  const uint16_t ch = keyCodeToCharacter(keyCode);
+  if (!ch) {
+    return {};
+  }
+  return fcitx::utf8::UCS4ToUTF8(ch);
 }
 
 std::string OpenKeyAdapter::utf8DropLastN(const std::string &s, size_t n) {
-    if (n == 0) {
-        return s;
-    }
-    if (!fcitx::utf8::validate(s)) {
-        return {};
-    }
-    const auto len = fcitx::utf8::length(s);
-    if (n >= len) {
-        return {};
-    }
-    const auto keep = len - n;
-    auto it = fcitx::utf8::nextNChar(s.begin(), keep);
-    return std::string(s.begin(), it);
+  if (n == 0) {
+    return s;
+  }
+  if (!fcitx::utf8::validate(s)) {
+    return {};
+  }
+  const auto len = fcitx::utf8::length(s);
+  if (n >= len) {
+    return {};
+  }
+  const auto keep = len - n;
+  auto it = fcitx::utf8::nextNChar(s.begin(), keep);
+  return std::string(s.begin(), it);
 }
 
 bool OpenKeyAdapter::expandMacro(const std::string &asciiWord,
-                                std::string &outReplacement) const {
-    if (asciiWord.empty() || !fcitx::utf8::validate(asciiWord)) {
-        return false;
-    }
+                                 std::string &outReplacement) const {
+  if (asciiWord.empty() || !fcitx::utf8::validate(asciiWord)) {
+    return false;
+  }
 
-    std::vector<uint32_t> key;
-    key.reserve(asciiWord.size());
-    for (unsigned char ch : asciiWord) {
-        if (ch < 0x20 || ch > 0x7E) {
-            return false;
-        }
-        auto it = _characterMap.find(static_cast<uint32_t>(ch));
-        if (it == _characterMap.end()) {
-            return false;
-        }
-        key.push_back(it->second);
+  std::vector<uint32_t> key;
+  key.reserve(asciiWord.size());
+  for (unsigned char ch : asciiWord) {
+    if (ch < 0x20 || ch > 0x7E) {
+      return false;
     }
+    auto it = _characterMap.find(static_cast<uint32_t>(ch));
+    if (it == _characterMap.end()) {
+      return false;
+    }
+    key.push_back(it->second);
+  }
 
-    std::vector<uint32_t> macroContentCode;
-    if (!findMacro(key, macroContentCode)) {
-        return false;
-    }
+  std::vector<uint32_t> macroContentCode;
+  if (!findMacro(key, macroContentCode)) {
+    return false;
+  }
 
-    std::string out;
-    for (const auto code : macroContentCode) {
-        out += engineCodeToUTF8(code);
-    }
-    if (!fcitx::utf8::validate(out)) {
-        return false;
-    }
-    outReplacement = std::move(out);
-    return true;
+  std::string out;
+  for (const auto code : macroContentCode) {
+    out += engineCodeToUTF8(code);
+  }
+  if (!fcitx::utf8::validate(out)) {
+    return false;
+  }
+  outReplacement = std::move(out);
+  return true;
 }
 
 bool OpenKeyAdapter::restoreOnWordBreak(const std::string &currentWord,
                                         char breakChar,
                                         std::string &outRestoredWord) const {
-    if (currentWord.empty() || !fcitx::utf8::validate(currentWord)) {
-        return false;
-    }
+  if (currentWord.empty() || !fcitx::utf8::validate(currentWord)) {
+    return false;
+  }
 
-    resetCoreState();
+  resetCoreState();
 
-    auto internalWord = encodeWordToInternal(currentWord);
-    if (internalWord.empty()) {
-        return false;
-    }
-    if (internalWord.size() > MAX_BUFF) {
-        internalWord.resize(MAX_BUFF);
-    }
+  auto internalWord = encodeWordToInternal(currentWord);
+  if (internalWord.empty()) {
+    return false;
+  }
+  if (internalWord.size() > MAX_BUFF) {
+    internalWord.resize(MAX_BUFF);
+  }
 
-    auto it = _characterMap.find(static_cast<uint32_t>(
-        static_cast<unsigned char>(breakChar)));
-    if (it == _characterMap.end()) {
-        return false;
-    }
+  auto it = _characterMap.find(
+      static_cast<uint32_t>(static_cast<unsigned char>(breakChar)));
+  if (it == _characterMap.end()) {
+    return false;
+  }
 
-    vSetCurrentWord(internalWord.data(), static_cast<Uint8>(internalWord.size()));
+  vSetCurrentWord(internalWord.data(), static_cast<Uint8>(internalWord.size()));
 
-    const uint32_t internalKey = it->second;
-    const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
-    const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
-    vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
-                    capsStatus, false);
+  const uint32_t internalKey = it->second;
+  const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
+  const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
+  vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
+                  capsStatus, false);
 
-    if (hookState_->code != vRestore &&
-        hookState_->code != vRestoreAndStartNewSession) {
-        return false;
-    }
+  if (hookState_->code != vRestore &&
+      hookState_->code != vRestoreAndStartNewSession) {
+    return false;
+  }
 
-    std::string restored =
-        utf8DropLastN(currentWord, hookState_->backspaceCount);
-    for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
-        restored += engineCodeToUTF8(hookState_->charData[i]);
-    }
-    if (!fcitx::utf8::validate(restored) || restored.empty() ||
-        restored == currentWord) {
-        return false;
-    }
-    outRestoredWord = std::move(restored);
-    return true;
+  std::string restored = utf8DropLastN(currentWord, hookState_->backspaceCount);
+  for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+    restored += engineCodeToUTF8(hookState_->charData[i]);
+  }
+  if (!fcitx::utf8::validate(restored) || restored.empty() ||
+      restored == currentWord) {
+    return false;
+  }
+  outRestoredWord = std::move(restored);
+  return true;
 }
 
 bool OpenKeyAdapter::restoreFromRawAsciiOnWordBreak(
-    const std::string &currentWord, const std::string &rawAscii,
-    char breakChar, std::string &outRestoredWord) const {
-    if (currentWord.empty() || rawAscii.empty() ||
-        !fcitx::utf8::validate(currentWord)) {
-        return false;
-    }
+    const std::string &currentWord, const std::string &rawAscii, char breakChar,
+    std::string &outRestoredWord) const {
+  if (currentWord.empty() || rawAscii.empty() ||
+      !fcitx::utf8::validate(currentWord)) {
+    return false;
+  }
 
-    auto breakIt = _characterMap.find(static_cast<uint32_t>(
-        static_cast<unsigned char>(breakChar)));
-    if (breakIt == _characterMap.end()) {
-        return false;
-    }
+  auto breakIt = _characterMap.find(
+      static_cast<uint32_t>(static_cast<unsigned char>(breakChar)));
+  if (breakIt == _characterMap.end()) {
+    return false;
+  }
 
-    const int savedUseMacro = vUseMacro;
-    vUseMacro = 0;
+  const int savedUseMacro = vUseMacro;
+  vUseMacro = 0;
 
-    resetCoreState();
-    std::string replayedWord;
-    for (unsigned char ch : rawAscii) {
-        auto it = _characterMap.find(static_cast<uint32_t>(ch));
-        if (it == _characterMap.end()) {
-            vUseMacro = savedUseMacro;
-            return false;
-        }
-        const uint32_t internalKey = it->second;
-        const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
-        const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
-        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
-                        capsStatus, false);
-
-        if (hookState_->code == vDoNothing) {
-            replayedWord.push_back(static_cast<char>(ch));
-        } else if (hookState_->code == vWillProcess ||
-                   hookState_->code == vRestore ||
-                   hookState_->code == vRestoreAndStartNewSession) {
-            replayedWord = utf8DropLastN(replayedWord, hookState_->backspaceCount);
-            for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
-                replayedWord += engineCodeToUTF8(hookState_->charData[i]);
-            }
-            if (hookState_->code == vRestore ||
-                hookState_->code == vRestoreAndStartNewSession) {
-                replayedWord.push_back(static_cast<char>(ch));
-            }
-        } else {
-            vUseMacro = savedUseMacro;
-            return false;
-        }
-    }
-
-    const uint32_t breakInternalKey = breakIt->second;
-    const Uint16 breakData = static_cast<Uint16>(breakInternalKey & CHAR_MASK);
-    const Uint8 breakCapsStatus = (breakInternalKey & CAPS_MASK) ? 1 : 0;
-    vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, breakData,
-                    breakCapsStatus, false);
-
-    vUseMacro = savedUseMacro;
-
-    if (hookState_->code != vRestore &&
-        hookState_->code != vRestoreAndStartNewSession) {
-        // Keep the user's physical `w` sequence when Telex collapses an invalid
-        // tail such as `ddww` into a displayed word ending in literal `w`.
-        const bool shownEndsWithLiteralW =
-            !currentWord.empty() &&
-            (currentWord.back() == 'w' || currentWord.back() == 'W');
-        const bool rawContainsRepeatedW =
-            rawAscii.find("ww") != std::string::npos ||
-            rawAscii.find("wW") != std::string::npos ||
-            rawAscii.find("Ww") != std::string::npos ||
-            rawAscii.find("WW") != std::string::npos;
-        if (rawAscii != currentWord && shownEndsWithLiteralW &&
-            rawContainsRepeatedW) {
-            outRestoredWord = rawAscii;
-            return true;
-        }
-        return false;
-    }
-
-    std::string restored =
-        utf8DropLastN(replayedWord, hookState_->backspaceCount);
-    for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
-        restored += engineCodeToUTF8(hookState_->charData[i]);
-    }
-    if (!fcitx::utf8::validate(restored) || restored.empty() ||
-        restored == currentWord) {
-        return false;
-    }
-    outRestoredWord = std::move(restored);
-    return true;
-}
-
-OpenKeyProcessResult OpenKeyAdapter::processAsciiKey(const std::string &currentWord,
-                                                    char asciiChar) const {
-    OpenKeyProcessResult result;
-    if (!isAsciiHandled(asciiChar)) {
-        return result;
-    }
-
-    if (literalWAtWordStart_ && currentWord.empty() &&
-        (asciiChar == 'w' || asciiChar == 'W')) {
-        result.handled = true;
-        result.newWord.assign(1, asciiChar);
-        return result;
-    }
-
-    // UniKey-like usability quirk:
-    // OpenKey core restores a trailing "ư" back to "uw" when the user types
-    // another `w`. For typical Telex expectations, collapse that repeat `w`
-    // into a plain `w` at the tail of the current word.
-    if (vInputType == vTelex && (asciiChar == 'w' || asciiChar == 'W') &&
-        fcitx::utf8::validate(currentWord)) {
-        const auto len = fcitx::utf8::length(currentWord);
-        if (len > 0) {
-            auto it = fcitx::utf8::nextNChar(currentWord.begin(), len - 1);
-            const std::string lastChar(it, currentWord.end());
-            if (lastChar == "ư" || lastChar == "Ư") {
-                result.handled = true;
-                result.newWord = utf8DropLastN(currentWord, 1);
-                result.newWord += asciiChar;
-                return result;
-            }
-        }
-    }
-
-    resetCoreState();
-
-    const auto internalWord = encodeWordToInternal(currentWord);
-    if (!currentWord.empty() && internalWord.empty()) {
-        // Unsupported / non-Vietnamese word segment.
-        return result;
-    }
-
-    std::vector<uint32_t> word = internalWord;
-    if (word.size() > MAX_BUFF) {
-        word.resize(MAX_BUFF);
-    }
-
-    vSetCurrentWord(word.empty() ? nullptr : word.data(),
-                    static_cast<Uint8>(word.size()));
-
-    // Map ascii char to OpenKey keycode + caps status.
-    const auto it = _characterMap.find(static_cast<uint32_t>(
-        static_cast<unsigned char>(asciiChar)));
+  resetCoreState();
+  std::string replayedWord;
+  for (unsigned char ch : rawAscii) {
+    auto it = _characterMap.find(static_cast<uint32_t>(ch));
     if (it == _characterMap.end()) {
-        return result;
+      vUseMacro = savedUseMacro;
+      return false;
     }
     const uint32_t internalKey = it->second;
     const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
     const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
-
     vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
                     capsStatus, false);
 
-    // Derive new word by applying hook state output.
-    // For vDoNothing, OpenKey expects caller to just emit the raw key.
-    std::string newWord = currentWord;
     if (hookState_->code == vDoNothing) {
-        newWord += asciiChar;
+      replayedWord.push_back(static_cast<char>(ch));
     } else if (hookState_->code == vWillProcess ||
                hookState_->code == vRestore ||
                hookState_->code == vRestoreAndStartNewSession) {
-        newWord = utf8DropLastN(currentWord, hookState_->backspaceCount);
-        for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
-            newWord += engineCodeToUTF8(hookState_->charData[i]);
-        }
-        if (hookState_->code == vRestore ||
-            hookState_->code == vRestoreAndStartNewSession) {
-            newWord += asciiChar;
-        }
+      replayedWord = utf8DropLastN(replayedWord, hookState_->backspaceCount);
+      for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+        replayedWord += engineCodeToUTF8(hookState_->charData[i]);
+      }
+      if (hookState_->code == vRestore ||
+          hookState_->code == vRestoreAndStartNewSession) {
+        replayedWord.push_back(static_cast<char>(ch));
+      }
     } else {
-        // Other codes (macro) are handled at higher level (word break).
-        return result;
+      vUseMacro = savedUseMacro;
+      return false;
     }
+  }
 
-    result.handled = true;
-    result.newWord = std::move(newWord);
-    return result;
+  const uint32_t breakInternalKey = breakIt->second;
+  const Uint16 breakData = static_cast<Uint16>(breakInternalKey & CHAR_MASK);
+  const Uint8 breakCapsStatus = (breakInternalKey & CAPS_MASK) ? 1 : 0;
+  vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, breakData,
+                  breakCapsStatus, false);
+
+  vUseMacro = savedUseMacro;
+
+  if (hookState_->code != vRestore &&
+      hookState_->code != vRestoreAndStartNewSession) {
+    // Keep the user's physical `w` sequence when Telex collapses an invalid
+    // tail such as `ddww` into a displayed word ending in literal `w`.
+    const bool shownEndsWithLiteralW =
+        !currentWord.empty() &&
+        (currentWord.back() == 'w' || currentWord.back() == 'W');
+    const bool rawContainsRepeatedW =
+        rawAscii.find("ww") != std::string::npos ||
+        rawAscii.find("wW") != std::string::npos ||
+        rawAscii.find("Ww") != std::string::npos ||
+        rawAscii.find("WW") != std::string::npos;
+    if (literalWAtWordStart_ && rawAscii != currentWord &&
+        shownEndsWithLiteralW && rawContainsRepeatedW) {
+      outRestoredWord = rawAscii;
+      return true;
+    }
+    return false;
+  }
+
+  std::string restored =
+      utf8DropLastN(replayedWord, hookState_->backspaceCount);
+  for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+    restored += engineCodeToUTF8(hookState_->charData[i]);
+  }
+  if (!fcitx::utf8::validate(restored) || restored.empty() ||
+      restored == currentWord) {
+    return false;
+  }
+  outRestoredWord = std::move(restored);
+  return true;
 }
 
-std::string OpenKeyAdapter::convertRawBuffer(const std::string &rawAscii) const {
-    std::string word;
-    if (rawAscii.empty()) {
-        return word;
+OpenKeyProcessResult
+OpenKeyAdapter::processAsciiKey(const std::string &currentWord,
+                                char asciiChar) const {
+  OpenKeyProcessResult result;
+  if (!isAsciiHandled(asciiChar)) {
+    return result;
+  }
+
+  if (literalWAtWordStart_ && currentWord.empty() &&
+      (asciiChar == 'w' || asciiChar == 'W')) {
+    result.handled = true;
+    result.newWord.assign(1, asciiChar);
+    return result;
+  }
+
+  // UniKey-like usability quirk:
+  // OpenKey core restores a trailing "ư" back to "uw" when the user types
+  // another `w`. For typical Telex expectations, collapse that repeat `w`
+  // into a plain `w` at the tail of the current word.
+  if (vInputType == vTelex && (asciiChar == 'w' || asciiChar == 'W') &&
+      fcitx::utf8::validate(currentWord)) {
+    const auto len = fcitx::utf8::length(currentWord);
+    if (len > 0) {
+      auto it = fcitx::utf8::nextNChar(currentWord.begin(), len - 1);
+      const std::string lastChar(it, currentWord.end());
+      if (lastChar == "ư" || lastChar == "Ư") {
+        result.handled = true;
+        result.newWord = utf8DropLastN(currentWord, 1);
+        result.newWord += asciiChar;
+        return result;
+      }
     }
-    for (unsigned char ch : rawAscii) {
-        if (ch < 0x20 || ch > 0x7E) {
-            break;
-        }
-        const char c = static_cast<char>(ch);
-        auto r = processAsciiKey(word, c);
-        if (r.handled) {
-            word = std::move(r.newWord);
-        } else {
-            word.push_back(c);
-        }
+  }
+
+  resetCoreState();
+
+  const auto internalWord = encodeWordToInternal(currentWord);
+  if (!currentWord.empty() && internalWord.empty()) {
+    // Unsupported / non-Vietnamese word segment.
+    return result;
+  }
+
+  std::vector<uint32_t> word = internalWord;
+  if (word.size() > MAX_BUFF) {
+    word.resize(MAX_BUFF);
+  }
+
+  vSetCurrentWord(word.empty() ? nullptr : word.data(),
+                  static_cast<Uint8>(word.size()));
+
+  // Map ascii char to OpenKey keycode + caps status.
+  const auto it = _characterMap.find(
+      static_cast<uint32_t>(static_cast<unsigned char>(asciiChar)));
+  if (it == _characterMap.end()) {
+    return result;
+  }
+  const uint32_t internalKey = it->second;
+  const Uint16 data = static_cast<Uint16>(internalKey & CHAR_MASK);
+  const Uint8 capsStatus = (internalKey & CAPS_MASK) ? 1 : 0;
+
+  vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, data,
+                  capsStatus, false);
+
+  // Derive new word by applying hook state output.
+  // For vDoNothing, OpenKey expects caller to just emit the raw key.
+  std::string newWord = currentWord;
+  if (hookState_->code == vDoNothing) {
+    newWord += asciiChar;
+  } else if (hookState_->code == vWillProcess || hookState_->code == vRestore ||
+             hookState_->code == vRestoreAndStartNewSession) {
+    newWord = utf8DropLastN(currentWord, hookState_->backspaceCount);
+    for (int i = hookState_->newCharCount - 1; i >= 0; i--) {
+      newWord += engineCodeToUTF8(hookState_->charData[i]);
     }
-    if (!fcitx::utf8::validate(word)) {
-        return {};
+    if (hookState_->code == vRestore ||
+        hookState_->code == vRestoreAndStartNewSession) {
+      newWord += asciiChar;
     }
+  } else {
+    // Other codes (macro) are handled at higher level (word break).
+    return result;
+  }
+
+  result.handled = true;
+  result.newWord = std::move(newWord);
+  return result;
+}
+
+std::string
+OpenKeyAdapter::convertRawBuffer(const std::string &rawAscii) const {
+  std::string word;
+  if (rawAscii.empty()) {
     return word;
+  }
+  for (unsigned char ch : rawAscii) {
+    if (ch < 0x20 || ch > 0x7E) {
+      break;
+    }
+    const char c = static_cast<char>(ch);
+    auto r = processAsciiKey(word, c);
+    if (r.handled) {
+      word = std::move(r.newWord);
+    } else {
+      word.push_back(c);
+    }
+  }
+  if (!fcitx::utf8::validate(word)) {
+    return {};
+  }
+  return word;
+}
+
+static bool isTelexModifierOrTone(char c) {
+  char low = std::tolower(static_cast<unsigned char>(c));
+  return low == 'w' || low == 's' || low == 'f' || low == 'r' || low == 'x' ||
+         low == 'j';
+}
+
+static bool isTelexTailFollower(char c) {
+  char low = std::tolower(static_cast<unsigned char>(c));
+  return isTelexModifierOrTone(c) || low == 'c' || low == 'm' || low == 'n' ||
+         low == 'p' || low == 't' || low == 'g' || low == 'h' || low == 'a' ||
+         low == 'e' || low == 'i' || low == 'o' || low == 'u' || low == 'y';
+}
+
+static bool hasCaseInsensitivePatternAt(const std::string &raw, size_t index,
+                                        const char *pattern) {
+  for (size_t offset = 0; pattern[offset] != '\0'; ++offset) {
+    if (index + offset >= raw.size()) {
+      return false;
+    }
+    const char actual =
+        std::tolower(static_cast<unsigned char>(raw[index + offset]));
+    if (actual != pattern[offset]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool isActiveTelexTailAfter(const std::string &raw, size_t index) {
+  for (size_t i = index; i < raw.size(); ++i) {
+    if (!isTelexTailFollower(raw[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool hasOaBreveMistypeContext(const std::string &raw, size_t start) {
+  if (start == 0) {
+    return true;
+  }
+  const char previous =
+      std::tolower(static_cast<unsigned char>(raw[start - 1]));
+  return previous == 'h' || previous == 'k' || previous == 'l' ||
+         previous == 'x';
+}
+
+static bool reorderTailPattern(std::string &raw, const char *pattern,
+                               bool requireFollower) {
+  constexpr size_t patternLen = 3;
+  if (raw.size() < patternLen) {
+    return false;
+  }
+
+  for (size_t end = raw.size(); end >= patternLen; --end) {
+    const size_t start = end - patternLen;
+    if (hasCaseInsensitivePatternAt(raw, start, pattern) &&
+        (!requireFollower || end < raw.size()) &&
+        (pattern[0] != 'o' || hasOaBreveMistypeContext(raw, start)) &&
+        isActiveTelexTailAfter(raw, end)) {
+      std::swap(raw[start + 1], raw[start + 2]);
+      return true;
+    }
+    if (start == 0) {
+      break;
+    }
+  }
+  return false;
+}
+
+std::string
+OpenKeyAdapter::normalizeRawKeystrokes(const std::string &raw) const {
+  if (vLanguage != 1 || vInputType != 0) {
+    return raw;
+  }
+
+  std::string normalized = raw;
+  if (reorderTailPattern(normalized, "uwo", false) ||
+      reorderTailPattern(normalized, "owa", true)) {
+    return normalized;
+  }
+  return raw;
 }
 
 } // namespace openkey
