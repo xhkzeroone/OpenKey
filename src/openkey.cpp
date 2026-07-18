@@ -780,6 +780,54 @@ static bool isBrowserLikeProgram(const OpenKeyState &state) {
   return false;
 }
 
+static bool isTerminalLikeProgram(const std::string &normalizedProgram) {
+  static const std::unordered_set<std::string> kTerminalPrograms = {
+      "alacritty",
+      "blackbox",
+      "com.mitchellh.ghostty",
+      "com.raggesilver.blackbox",
+      "contour",
+      "cool-retro-term",
+      "deepin-terminal",
+      "foot",
+      "gnome-console",
+      "gnome-terminal",
+      "guake",
+      "io.elementary.terminal",
+      "jetbrains-clion",
+      "jetbrains-datagrip",
+      "jetbrains-dataspell",
+      "jetbrains-goland",
+      "jetbrains-idea",
+      "jetbrains-phpstorm",
+      "jetbrains-pycharm",
+      "jetbrains-rider",
+      "jetbrains-rubymine",
+      "jetbrains-webstorm",
+      "kgx",
+      "kitty",
+      "konsole",
+      "lxterminal",
+      "mate-terminal",
+      "org.gnome.console",
+      "org.gnome.terminal",
+      "org.kde.konsole",
+      "qterminal",
+      "rio",
+      "roxterm",
+      "st",
+      "tabby",
+      "terminator",
+      "terminology",
+      "tilix",
+      "urxvt",
+      "wezterm",
+      "xfce4-terminal",
+      "xterm",
+  };
+  return kTerminalPrograms.find(normalizedProgram) != kTerminalPrograms.end();
+}
+
 static bool looksLikeBrowserAutocomplete(fcitx::InputContext *ic,
                                          const std::string &shownText) {
   if (!ic || shownText.empty()) {
@@ -3099,7 +3147,9 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s,
   }
 
   RuntimeMode mode;
-  if (isFirefoxLikeProgram(s)) {
+  if (isTerminalLikeProgram(normalizedProgram)) {
+    mode = RuntimeMode::DirectCommit;
+  } else if (isFirefoxLikeProgram(s)) {
     mode = RuntimeMode::Preedit;
   } else {
     mode = rewriteServerAvailable() ? RuntimeMode::BackspaceRewrite
@@ -3151,8 +3201,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
 
   if (key.checkKeyList(config_.switchModeKey.value()) &&
       key.sym() != FcitxKey_None) {
-    // DirectCommit is reserved for protected contexts such as password
-    // fields and is intentionally excluded from manual mode switching.
     if (state->mode == RuntimeMode::DirectCommit &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
       return;
@@ -3178,6 +3226,8 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     } else if (state->mode == RuntimeMode::Preedit) {
       nextMode = RuntimeMode::Surrounding;
     } else if (state->mode == RuntimeMode::Surrounding) {
+      nextMode = RuntimeMode::DirectCommit;
+    } else if (state->mode == RuntimeMode::DirectCommit) {
       returnToAuto = true;
     } else {
       nextMode = firstManualMode();
