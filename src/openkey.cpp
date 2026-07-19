@@ -676,13 +676,13 @@ struct RewriteTiming {
   uint64_t commitDelayUsec = 60000;
 };
 
-static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{10000, 20000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{10000, 40000};
 static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{
-    10000, 20000};
-static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 60000};
-static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 60000};
+    10000, 40000};
+static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 80000};
 static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000,
-                                                                       60000};
+                                                                       80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
 static constexpr uint64_t kSurroundingFastPathSettleDelayUsec = 20000;
 
@@ -1859,17 +1859,8 @@ public:
                          << rewriteState.seenBackspaces;
           }
           if (deps_.remoteScheduleWait) {
-            bool isSurrValid = ic->capabilityFlags().test(
-                                   fcitx::CapabilityFlag::SurroundingText) &&
-                               ic->surroundingText().isValid();
-            if (deps_.enableSurroundingFastPath &&
-                deps_.enableSurroundingFastPath() && !isSurrValid) {
               deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 30000 : 10000);
-            } else {
-              deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 30000 : 10000);
-            }
+                                       state.isX11Environment ? 50000 : 30000);
           }
           event.filterAndAccept();
           return true;
