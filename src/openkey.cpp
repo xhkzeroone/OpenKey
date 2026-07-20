@@ -1222,6 +1222,61 @@ struct SimpleModeHandlerDeps {
 };
 
 // ---------------------------------------------------------------------------
+// Surrounding text cache update helpers
+// ---------------------------------------------------------------------------
+
+/// Update the local SurroundingText cache after ic->deleteSurroundingText().
+/// This mirrors the deletion in the cached text so that subsequent reads
+/// of ic->surroundingText() reflect the latest state without waiting for
+/// the client to send it back.
+static void updateSurroundingCacheAfterDelete(fcitx::InputContext *ic,
+                                              int offset, unsigned int size) {
+  if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+    return;
+  }
+  auto &st = ic->surroundingText();
+  if (!st.isValid()) {
+    return;
+  }
+  st.deleteText(offset, size);
+}
+
+/// Update the local SurroundingText cache after ic->commitString().
+/// Inserts the committed text at the current cursor position and advances
+/// the cursor past the inserted text.
+static void updateSurroundingCacheAfterCommit(fcitx::InputContext *ic,
+                                              const std::string &committed) {
+  if (committed.empty()) {
+    return;
+  }
+  if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+    return;
+  }
+  auto &st = ic->surroundingText();
+  if (!st.isValid()) {
+    return;
+  }
+  const auto &text = st.text();
+  const unsigned int cursor = st.cursor();
+  const unsigned int anchor = st.anchor();
+
+  // Convert character-based cursor to byte offset for string splicing.
+  const size_t cursorBytes = fcitx::utf8::ncharByteLength(text.begin(), cursor);
+  std::string newText;
+  newText.reserve(text.size() + committed.size());
+  newText.append(text, 0, cursorBytes);
+  newText.append(committed);
+  newText.append(text, cursorBytes);
+
+  const unsigned int committedChars =
+      static_cast<unsigned int>(fcitx::utf8::length(committed));
+  const unsigned int newCursor = cursor + committedChars;
+  // If there was a selection (anchor != cursor), collapse it to the new cursor.
+  const unsigned int newAnchor = (anchor == cursor) ? newCursor : newCursor;
+  st.setText(newText, newCursor, newAnchor);
+}
+
+// ---------------------------------------------------------------------------
 // SurroundingModeHandler
 // ---------------------------------------------------------------------------
 
@@ -1295,9 +1350,13 @@ public:
         if (deleteChars > 0) {
           ic->deleteSurroundingText(-static_cast<int>(deleteChars),
                                     deleteChars);
+          updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
+                                            deleteChars);
         }
         if (newDisplay.size() > prefixLen) {
-          ic->commitString(newDisplay.substr(prefixLen));
+          const auto commitDelta = newDisplay.substr(prefixLen);
+          ic->commitString(commitDelta);
+          updateSurroundingCacheAfterCommit(ic, commitDelta);
         }
         state.rollbackDisplay = std::move(newDisplay);
         if (!state.rollbackRawBuffer.empty()) {
@@ -1371,7 +1430,10 @@ public:
         return false;
       }
       ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
+                                        deleteChars);
       ic->commitString(replacement);
+      updateSurroundingCacheAfterCommit(ic, replacement);
       state.rollbackWord = replacement;
       state.rollbackDisplay = replacement;
       state.rollbackRawBuffer.clear();
@@ -1479,9 +1541,13 @@ public:
       }
       if (deleteChars > 0) {
         ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+        updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
+                                          deleteChars);
       }
       if (newWord.size() > prefixLen) {
-        ic->commitString(newWord.substr(prefixLen));
+        const auto commitDelta = newWord.substr(prefixLen);
+        ic->commitString(commitDelta);
+        updateSurroundingCacheAfterCommit(ic, commitDelta);
       }
       if (debug) {
         FCITX_INFO() << "openkey: st apply program=" << state.program
@@ -1526,9 +1592,13 @@ public:
       }
       if (deleteChars > 0) {
         ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+        updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
+                                          deleteChars);
       }
       if (r.newWord.size() > prefixLen) {
-        ic->commitString(r.newWord.substr(prefixLen));
+        const auto commitDelta = r.newWord.substr(prefixLen);
+        ic->commitString(commitDelta);
+        updateSurroundingCacheAfterCommit(ic, commitDelta);
       }
       if (debug) {
         FCITX_INFO() << "openkey: st apply program=" << state.program
@@ -2100,6 +2170,7 @@ private:
 
     if (!commitText.empty()) {
       ic->commitString(commitText);
+      updateSurroundingCacheAfterCommit(ic, commitText);
     }
     rewriteState.shownText = shownAfter;
     rewriteState.waitingBackspaceAck = false;
@@ -2226,6 +2297,7 @@ private:
       rewriteState.rewriteLock = true;
       if (!commitText.empty()) {
         ic->commitString(commitText);
+        updateSurroundingCacheAfterCommit(ic, commitText);
       }
       rewriteState.shownText = newWord;
       rewriteState.hasRewrittenCurrentWord =
@@ -2248,15 +2320,14 @@ private:
         state.mode != RuntimeMode::BackspaceRewriteNoSurr &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
       const auto &st = ic->surroundingText();
-      if (st.isValid()) {  
+      if (st.isValid()) {
         WordSegment seg;
         if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
           size_t n = std::min(seg.word.size(), rewriteState.shownText.size());
           if (n >= kMinMatch &&
-              seg.word.compare(seg.word.size() - n, n,
-                              rewriteState.shownText,
-                              rewriteState.shownText.size() - n, n) == 0) {
-              stReliable = true;
+              seg.word.compare(seg.word.size() - n, n, rewriteState.shownText,
+                               rewriteState.shownText.size() - n, n) == 0) {
+            stReliable = true;
           }
         } else if (debug) {
           FCITX_INFO()
@@ -2283,8 +2354,11 @@ private:
         // deleteSurroundingText/commitString are asynchronous at some
         rewriteState.rewriteLock = true;
         ic->deleteSurroundingText(-static_cast<int>(deleteCount), deleteCount);
+        updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteCount),
+                                          deleteCount);
         if (!commitText.empty()) {
           ic->commitString(commitText);
+          updateSurroundingCacheAfterCommit(ic, commitText);
         }
         rewriteState.shownText = newWord;
         rewriteState.hasRewrittenCurrentWord =
@@ -2312,6 +2386,11 @@ private:
       rewriteState.hasRewrittenCurrentWord =
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
+
+      // TODO: check again
+      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteCount),
+                                        deleteCount);
+
       if (deps_.remoteSchedule(ic, state, deleteCount, timing.interKeyUsec,
                                timing.commitDelayUsec)) {
         rewriteState.remoteRewritePending = true;
