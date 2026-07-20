@@ -28,7 +28,6 @@
 #include <vector>
 
 #include <fcitx-config/iniparser.h>
-#include <fcitx/action.h>
 #include <fcitx-utils/dbus/bus.h>
 #include <fcitx-utils/eventdispatcher.h>
 #include <fcitx-utils/key.h>
@@ -38,6 +37,7 @@
 #include <fcitx-utils/stringutils.h>
 #include <fcitx-utils/trackableobject.h>
 #include <fcitx-utils/utf8.h>
+#include <fcitx/action.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontext.h>
@@ -113,6 +113,7 @@ namespace openkey {
 
 #ifdef __linux__
 constexpr int kRewriteServerNiceValue = -10;
+constexpr size_t kMinMatch = 2;
 
 static bool rewriteServerPriorityEnabled() {
   const char *env = std::getenv("OPENKEY_NONPREEDIT_SERVER_PRIORITY");
@@ -1859,8 +1860,8 @@ public:
                          << rewriteState.seenBackspaces;
           }
           if (deps_.remoteScheduleWait) {
-              deps_.remoteScheduleWait(state,
-                                       state.isX11Environment ? 50000 : 30000);
+            deps_.remoteScheduleWait(state,
+                                     state.isX11Environment ? 50000 : 30000);
           }
           event.filterAndAccept();
           return true;
@@ -2247,8 +2248,22 @@ private:
         state.mode != RuntimeMode::BackspaceRewriteNoSurr &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
       const auto &st = ic->surroundingText();
-      if (st.isValid()) {
-        stReliable = true;
+      if (st.isValid()) {  
+        WordSegment seg;
+        if (extractWordBeforeCursor(st.text(), st.cursor(), seg)) {
+          size_t n = std::min(seg.word.size(), rewriteState.shownText.size());
+          if (n >= kMinMatch &&
+              seg.word.compare(seg.word.size() - n, n,
+                              rewriteState.shownText,
+                              rewriteState.shownText.size() - n, n) == 0) {
+              stReliable = true;
+          }
+        } else if (debug) {
+          FCITX_INFO()
+              << "openkey: backspace-rewrite skip ST fast path program="
+              << state.program << " reason=empty_st_word"
+              << " shownText=" << rewriteState.shownText;
+        }
       }
     }
 
@@ -3232,12 +3247,12 @@ void OpenKeyEngine::addModeMenuToStatusArea(fcitx::InputContext *ic) {
                        modePreeditAction_.get());
   statusArea.addAction(fcitx::StatusGroup::InputMethod,
                        modeSurroundingAction_.get());
-  statusArea.addAction(fcitx::StatusGroup::InputMethod, modeDirectAction_.get());
+  statusArea.addAction(fcitx::StatusGroup::InputMethod,
+                       modeDirectAction_.get());
   refreshModeMenu(ic);
 }
 
-void OpenKeyEngine::setModeFromMenu(fcitx::InputContext *ic,
-                                    RuntimeMode mode) {
+void OpenKeyEngine::setModeFromMenu(fcitx::InputContext *ic, RuntimeMode mode) {
   if (!ic) {
     return;
   }
