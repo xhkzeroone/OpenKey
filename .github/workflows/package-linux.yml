@@ -174,11 +174,55 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
 
+  pacman:
+    runs-on: ubuntu-24.04
+    needs: version
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Pacman package in Arch Linux container
+        run: |
+          rm -rf dist arch-pkg
+          mkdir -p dist arch-pkg
+          git archive --format=tar.gz \
+            --prefix="fcitx5-openkey-${VERSION}/" \
+            -o "arch-pkg/fcitx5-openkey-${VERSION}.tar.gz" HEAD
+          cp packaging/arch/PKGBUILD arch-pkg/PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" arch-pkg/PKGBUILD
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            archlinux:latest \
+            bash -lc '
+              set -euo pipefail
+              pacman -Syu --noconfirm
+              pacman -S --needed --noconfirm \
+                base-devel \
+                cmake \
+                extra-cmake-modules \
+                fcitx5 \
+                go \
+                pkgconf
+              useradd --create-home builder
+              chown -R builder:builder arch-pkg
+              su builder -c "cd /work/arch-pkg && makepkg --syncdeps --noconfirm"
+              mv arch-pkg/*.pkg.tar.zst dist/
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fcitx5-openkey-pacman
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
   release:
     runs-on: ubuntu-24.04
     needs:
       - deb
       - rpm
+      - pacman
     if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/0') || startsWith(github.ref, 'refs/tags/1') || startsWith(github.ref, 'refs/tags/2') || startsWith(github.ref, 'refs/tags/3') || startsWith(github.ref, 'refs/tags/4') || startsWith(github.ref, 'refs/tags/5') || startsWith(github.ref, 'refs/tags/6') || startsWith(github.ref, 'refs/tags/7') || startsWith(github.ref, 'refs/tags/8') || startsWith(github.ref, 'refs/tags/9')
     steps:
       - uses: actions/checkout@v4

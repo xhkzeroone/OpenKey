@@ -1,0 +1,22 @@
+pkgname=fcitx5-openkey
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='OpenKey Vietnamese input method for Fcitx5'
+arch=('x86_64')
+url='https://github.com/open-key/OpenKey'
+license=('GPL-3.0-only')
+depends=('fcitx5')
+makedepends=('cmake' 'extra-cmake-modules' 'go' 'pkgconf')
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cmake -S "${srcdir}/${pkgname}-${pkgver}" -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build
+}
+
+package() {
+  DESTDIR="${pkgdir}" cmake --install build
+}
