@@ -2314,8 +2314,8 @@ private:
       return true;
     }
 
-    bool stReliable = false;
-    if (!browserAutocomplete && deps_.enableSurroundingFastPath &&
+    if (!state.surroundingTextReliabilityKnown && !browserAutocomplete &&
+        deps_.enableSurroundingFastPath &&
         deps_.enableSurroundingFastPath() &&
         state.mode != RuntimeMode::BackspaceRewriteNoSurr &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
@@ -2327,7 +2327,7 @@ private:
           if (n >= kMinMatch &&
               seg.word.compare(seg.word.size() - n, n, rewriteState.shownText,
                                rewriteState.shownText.size() - n, n) == 0) {
-            stReliable = true;
+            state.surroundingTextReliable = true;
           }
         } else if (debug) {
           FCITX_INFO()
@@ -2336,17 +2336,10 @@ private:
               << " shownText=" << rewriteState.shownText;
         }
       }
+      state.surroundingTextReliabilityKnown = true;
     }
 
-    if (stReliable) {
-      bool hasMultibyte = false;
-      for (char c : rewriteState.shownText.substr(prefixLen)) {
-        if ((c & 0x80) != 0) {
-          hasMultibyte = true;
-          break;
-        }
-      }
-      if (!hasMultibyte) {
+    if (state.surroundingTextReliable) {
         if (debug) {
           FCITX_INFO() << "openkey: backspace-rewrite fast path ST deleteCount="
                        << deleteCount;
@@ -2372,7 +2365,7 @@ private:
           rewriteState.rewriteLock = false;
         }
         return true;
-      }
+
     }
 
     if (deps_.remoteEnabled && deps_.remoteEnabled() && deps_.remoteSchedule) {
@@ -3059,6 +3052,8 @@ void OpenKeyEngine::activate(const fcitx::InputMethodEntry &,
   state->isX11Environment = isX11Environment_;
 
   state->rewriteState.clear();
+  state->surroundingTextReliabilityKnown = false;
+  state->surroundingTextReliable = false;
   state->composing.clear();
   state->preeditKeyBuffer.clear();
   state->manualMode = false;

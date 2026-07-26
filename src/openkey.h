@@ -121,6 +121,8 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   std::string windowTitle;
   int codeTable = 0;
   bool isX11Environment = false;
+  bool surroundingTextReliabilityKnown = false;
+  bool surroundingTextReliable = false;
   // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển thị.
   bool x11FirstWordPreedit = false;
   // SurroundingTextModeHandler states
