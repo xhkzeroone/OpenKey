@@ -643,4 +643,66 @@ OpenKeyAdapter::normalizeRawKeystrokes(const std::string &raw) const {
   return raw;
 }
 
+bool OpenKeyAdapter::isToneKey(char c) const {
+  if (vInputType == 1) { // vVNI
+    return (c >= '1' && c <= '5');
+  } else { // vTelex, vSimpleTelex1, vSimpleTelex2
+    char low = std::tolower(static_cast<unsigned char>(c));
+    return low == 's' || low == 'f' || low == 'r' || low == 'x' || low == 'j';
+  }
+}
+
+bool OpenKeyAdapter::isRemoveToneKey(char c) const {
+  if (vInputType == 1) { // vVNI
+    return c == '0';
+  } else { // vTelex, vSimpleTelex1, vSimpleTelex2
+    char low = std::tolower(static_cast<unsigned char>(c));
+    return low == 'z';
+  }
+}
+
+uint32_t OpenKeyAdapter::getWordToneMask(const std::string &word) const {
+  auto internal = encodeWordToInternal(word);
+  uint32_t tone = 0;
+  for (uint32_t code : internal) {
+    tone |= (code & MARK_MASK);
+  }
+  return tone;
+}
+
+void OpenKeyAdapter::adjustRawBufferForTone(std::string &rawBuffer,
+                                            const std::string &oldWord,
+                                            const std::string &newWord,
+                                            char c) const {
+  uint32_t oldTone = getWordToneMask(oldWord);
+  uint32_t newTone = getWordToneMask(newWord);
+
+  bool isRemove = isRemoveToneKey(c);
+  bool isTone = isToneKey(c);
+
+  if ((isRemove && oldTone != 0 && newTone == 0) ||
+      (isTone && oldTone != 0 && newTone == 0)) {
+    // Tone removed
+    for (int i = static_cast<int>(rawBuffer.size()) - 1; i >= 0; --i) {
+      if (isToneKey(rawBuffer[i])) {
+        rawBuffer.erase(i, 1);
+        return;
+      }
+    }
+  } else if (isTone && oldTone != 0 && newTone != 0 && oldTone != newTone) {
+    // Tone changed
+    for (int i = static_cast<int>(rawBuffer.size()) - 1; i >= 0; --i) {
+      if (isToneKey(rawBuffer[i])) {
+        rawBuffer[i] = c;
+        return;
+      }
+    }
+    // Fallback if not found in rawBuffer
+    rawBuffer.push_back(c);
+  } else {
+    // Other cases: just append c
+    rawBuffer.push_back(c);
+  }
+}
+
 } // namespace openkey

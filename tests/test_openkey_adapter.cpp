@@ -427,6 +427,51 @@ int main() {
              "UOWC");
   }
 
+  // Test adjustRawBufferForTone
+  {
+    openkey::OpenKeyAdapter telexAdapter;
+    telexAdapter.setInputType(0); // Telex
+    telexAdapter.setCodeTable(0); // Unicode precomposed
+    telexAdapter.setFreeMark(true);
+    telexAdapter.setCheckSpelling(true);
+
+    // 1. Changing tone: hoas -> hoaf
+    std::string raw1 = "hoas";
+    telexAdapter.adjustRawBufferForTone(raw1, "hóa", "hòa", 'f');
+    expectEq("adjustRawBufferForTone telex change tone", raw1, "hoaf");
+
+    // 2. Removing tone with z: hoas -> hoa
+    std::string raw2 = "hoas";
+    telexAdapter.adjustRawBufferForTone(raw2, "hóa", "hoa", 'z');
+    expectEq("adjustRawBufferForTone telex remove tone with z", raw2, "hoa");
+
+    // 3. Removing tone with duplicate key: hoas -> hoa
+    std::string raw3 = "hoas";
+    telexAdapter.adjustRawBufferForTone(raw3, "hóa", "hoa", 's');
+    expectEq("adjustRawBufferForTone telex remove tone with duplicate key", raw3, "hoa");
+
+    // 4. Non-tone key / no-op: hoa -> hoas
+    std::string raw4 = "hoa";
+    telexAdapter.adjustRawBufferForTone(raw4, "hoa", "hóa", 's');
+    expectEq("adjustRawBufferForTone telex add tone", raw4, "hoas");
+
+    openkey::OpenKeyAdapter vniAdapter;
+    vniAdapter.setInputType(1); // VNI
+    vniAdapter.setCodeTable(0); // Unicode precomposed
+    vniAdapter.setFreeMark(true);
+    vniAdapter.setCheckSpelling(true);
+
+    // 5. VNI changing tone: hoa1 -> hoa2
+    std::string raw5 = "hoa1";
+    vniAdapter.adjustRawBufferForTone(raw5, "hóa", "hòa", '2');
+    expectEq("adjustRawBufferForTone vni change tone", raw5, "hoa2");
+
+    // 6. VNI removing tone with 0: hoa1 -> hoa
+    std::string raw6 = "hoa1";
+    vniAdapter.adjustRawBufferForTone(raw6, "hóa", "hoa", '0');
+    expectEq("adjustRawBufferForTone vni remove tone", raw6, "hoa");
+  }
+
   if (failures == 0) {
     std::cerr << "[OK] all tests passed\n";
     return 0;

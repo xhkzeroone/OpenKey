@@ -69,6 +69,14 @@ public:
   OpenKeyProcessResult processAsciiKey(const std::string &currentWord,
                                        char asciiChar) const;
 
+  bool isToneKey(char c) const;
+  bool isRemoveToneKey(char c) const;
+  uint32_t getWordToneMask(const std::string &word) const;
+  void adjustRawBufferForTone(std::string &rawBuffer,
+                              const std::string &oldWord,
+                              const std::string &newWord,
+                              char c) const;
+
 private:
   mutable const vKeyHookState *hookState_ = nullptr;
   bool literalWAtWordStart_ = false;

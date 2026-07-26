@@ -1603,9 +1603,15 @@ private:
                      << " newWord=" << r.newWord;
       }
 
+      const std::string oldWord = state.rollbackWord;
       state.rollbackWord = r.newWord;
       state.rollbackDisplay = r.newWord;
-      state.rollbackRawBuffer.push_back(c);
+      if (deps_.adapter->isToneKey(c) || deps_.adapter->isRemoveToneKey(c)) {
+        deps_.adapter->adjustRawBufferForTone(state.rollbackRawBuffer, oldWord,
+                                              r.newWord, c);
+      } else {
+        state.rollbackRawBuffer.push_back(c);
+      }
       state.lastCommitted = state.rollbackDisplay;
       return true;
     }
@@ -2653,7 +2659,13 @@ private:
           clearComposeState(state, "adapter-not-handled");
           return false;
         }
-        rewriteState.rawAsciiBuffer.push_back(c);
+        if (adapterShared->isToneKey(c) || adapterShared->isRemoveToneKey(c)) {
+          adapterShared->adjustRawBufferForTone(rewriteState.rawAsciiBuffer,
+                                                rewriteState.shownText,
+                                                r.newWord, c);
+        } else {
+          rewriteState.rawAsciiBuffer.push_back(c);
+        }
         return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
       }
     }
