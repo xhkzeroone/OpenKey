@@ -472,6 +472,23 @@ int main() {
     expectEq("adjustRawBufferForTone vni remove tone", raw6, "hoa");
   }
 
+  // Test hofa outputs hoà under freeMark and modern settings
+  {
+    openkey::OpenKeyAdapter adapter;
+    adapter.setInputType(0); // Telex
+    adapter.setCodeTable(0); // Unicode precomposed
+    adapter.setUseModernOrthography(true);
+    adapter.setFreeMark(true);
+    expectEq("hofa with modern=true, freeMark=true", typeSequence(adapter, "hofa"), "hoà");
+
+    openkey::OpenKeyAdapter adapterOld;
+    adapterOld.setInputType(0); // Telex
+    adapterOld.setCodeTable(0); // Unicode precomposed
+    adapterOld.setUseModernOrthography(false);
+    adapterOld.setFreeMark(true);
+    expectEq("hofa with modern=false, freeMark=true", typeSequence(adapterOld, "hofa"), "hòa");
+  }
+
   if (failures == 0) {
     std::cerr << "[OK] all tests passed\n";
     return 0;
