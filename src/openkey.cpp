@@ -686,6 +686,8 @@ static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000,
                                                                        80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
 static constexpr uint64_t kSurroundingFastPathSettleDelayUsec = 20000;
+static constexpr uint64_t kSurroundingCommitDelayUsec = 3000;
+static constexpr uint64_t kSurroundingPostCommitDelayUsec = 10000;
 
 static bool isRunningOnX11() {
 
@@ -1214,6 +1216,9 @@ struct BackspaceRewriteDeps {
 };
 
 struct SimpleModeHandlerDeps {
+  fcitx::Instance *instance = nullptr;
+  fcitx::SimpleInputContextPropertyFactory<OpenKeyState> *factory = nullptr;
+  std::weak_ptr<void> lifetimeWeak;
   std::shared_ptr<OpenKeyAdapter> adapter;
   std::function<bool()> enableMacro;
   std::function<bool()> restoreIfWrongSpelling;
@@ -1287,7 +1292,23 @@ public:
 
   bool handleKey(fcitx::InputContext *ic, fcitx::KeyEvent &event,
                  OpenKeyState &state) override {
-    auto key = event.key().normalize();
+    const auto key = event.key().normalize();
+    if (state.surroundingRewriteLocked) {
+      state.surroundingQueuedKeys.push_back(key);
+      event.filterAndAccept();
+      return true;
+    }
+
+    const bool handled = processKey(ic, key, state);
+    if (handled) {
+      event.filterAndAccept();
+    }
+    return handled;
+  }
+
+private:
+  bool processKey(fcitx::InputContext *ic, const fcitx::Key &key,
+                  OpenKeyState &state) {
 
     // Preedit buffer should be empty in surrounding mode.
     state.composing.clear();
@@ -1347,17 +1368,8 @@ public:
           clearState("bs_delete_too_large");
           return false;
         }
-        if (deleteChars > 0) {
-          ic->deleteSurroundingText(-static_cast<int>(deleteChars),
-                                    deleteChars);
-          updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
-                                            deleteChars);
-        }
-        if (newDisplay.size() > prefixLen) {
-          const auto commitDelta = newDisplay.substr(prefixLen);
-          ic->commitString(commitDelta);
-          updateSurroundingCacheAfterCommit(ic, commitDelta);
-        }
+        scheduleRewrite(ic, state, deleteChars,
+                        newDisplay.substr(prefixLen));
         state.rollbackDisplay = std::move(newDisplay);
         if (!state.rollbackRawBuffer.empty()) {
           state.rollbackRawBuffer.pop_back();
@@ -1370,7 +1382,6 @@ public:
                        << " deleteChars=" << deleteChars
                        << " newDisplay=" << state.rollbackDisplay;
         }
-        event.filterAndAccept();
         return true;
       }
       if (restoreRollbackSnapshotAfterBoundary(state, debug)) {
@@ -1429,11 +1440,7 @@ public:
       if (deleteChars == 0 || deleteChars > 128) {
         return false;
       }
-      ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
-                                        deleteChars);
-      ic->commitString(replacement);
-      updateSurroundingCacheAfterCommit(ic, replacement);
+      scheduleRewrite(ic, state, deleteChars, replacement);
       state.rollbackWord = replacement;
       state.rollbackDisplay = replacement;
       state.rollbackRawBuffer.clear();
@@ -1473,21 +1480,31 @@ public:
     };
 
     if (isBoundaryASCII(c) && (c != ' ' || plainSpace)) {
-      if (!expandMacroBeforeBoundary(c)) {
-        restoreBeforeBoundary(c);
+      bool rewritten = expandMacroBeforeBoundary(c);
+      if (!rewritten) {
+        rewritten = restoreBeforeBoundary(c);
       }
       rememberRollbackSnapshot(state);
       clearState("boundary_ascii");
       state.noSeedNextWord = true;
+      if (rewritten) {
+        state.surroundingQueuedKeys.push_back(key);
+        return true;
+      }
       return false;
     }
 
     if (!isComposingASCII(c)) {
-      if (!expandMacroBeforeBoundary(c)) {
-        restoreBeforeBoundary(c);
+      bool rewritten = expandMacroBeforeBoundary(c);
+      if (!rewritten) {
+        rewritten = restoreBeforeBoundary(c);
       }
       clearState("non_composing_ascii");
       state.noSeedNextWord = true;
+      if (rewritten) {
+        state.surroundingQueuedKeys.push_back(key);
+        return true;
+      }
       return false;
     }
 
@@ -1539,16 +1556,7 @@ public:
         clearState("apply_delete_too_large");
         return false;
       }
-      if (deleteChars > 0) {
-        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
-                                          deleteChars);
-      }
-      if (newWord.size() > prefixLen) {
-        const auto commitDelta = newWord.substr(prefixLen);
-        ic->commitString(commitDelta);
-        updateSurroundingCacheAfterCommit(ic, commitDelta);
-      }
+      scheduleRewrite(ic, state, deleteChars, newWord.substr(prefixLen));
       if (debug) {
         FCITX_INFO() << "openkey: st apply program=" << state.program
                      << " deleteChars=" << deleteChars
@@ -1559,7 +1567,6 @@ public:
       state.rollbackDisplay = newWord;
       state.rollbackRawBuffer = std::move(normalizedRaw);
       state.lastCommitted = state.rollbackDisplay;
-      event.filterAndAccept();
       return true;
     } else {
       auto r = deps_.adapter->processAsciiKey(state.rollbackWord, c);
@@ -1590,16 +1597,7 @@ public:
         clearState("apply_delete_too_large");
         return false;
       }
-      if (deleteChars > 0) {
-        ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
-                                          deleteChars);
-      }
-      if (r.newWord.size() > prefixLen) {
-        const auto commitDelta = r.newWord.substr(prefixLen);
-        ic->commitString(commitDelta);
-        updateSurroundingCacheAfterCommit(ic, commitDelta);
-      }
+      scheduleRewrite(ic, state, deleteChars, r.newWord.substr(prefixLen));
       if (debug) {
         FCITX_INFO() << "openkey: st apply program=" << state.program
                      << " deleteChars=" << deleteChars
@@ -1611,7 +1609,6 @@ public:
       state.rollbackDisplay = r.newWord;
       state.rollbackRawBuffer.push_back(c);
       state.lastCommitted = state.rollbackDisplay;
-      event.filterAndAccept();
       return true;
     }
   }
@@ -1628,9 +1625,96 @@ public:
     state.rollbackRawBuffer.clear();
     clearRollbackSnapshot(state);
     state.noSeedNextWord = false;
+    state.surroundingRewriteLocked = false;
+    state.surroundingPendingCommit.clear();
+    state.surroundingQueuedKeys.clear();
+    state.surroundingCommitTimer.reset();
   }
 
 private:
+  void scheduleRewrite(fcitx::InputContext *ic, OpenKeyState &state,
+                       unsigned int deleteChars, std::string commitText) {
+    if (deleteChars == 0 && commitText.empty()) {
+      return;
+    }
+
+    if (deleteChars > 0) {
+      ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteChars),
+                                        deleteChars);
+    }
+
+    if (!deps_.instance || !deps_.factory) {
+      if (!commitText.empty()) {
+        ic->commitString(commitText);
+        updateSurroundingCacheAfterCommit(ic, commitText);
+      }
+      return;
+    }
+
+    state.surroundingRewriteLocked = true;
+    state.surroundingPendingCommit = std::move(commitText);
+    scheduleCommitTimer(ic, kSurroundingCommitDelayUsec, false);
+  }
+
+  void scheduleCommitTimer(fcitx::InputContext *ic, uint64_t delayUsec,
+                           bool unlockAfterTimer) {
+    auto *state = stateFor(ic);
+    if (!state) {
+      return;
+    }
+    const auto icRef = ic->watch();
+    const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+    const uint64_t deadline = fcitx::now(CLOCK_MONOTONIC) + delayUsec;
+    auto *loop = &deps_.instance->eventLoop();
+    auto *factory = deps_.factory;
+    state->surroundingCommitTimer = loop->addTimeEvent(
+        CLOCK_MONOTONIC, deadline, 0,
+        [this, icRef, lifetimeWeak, factory,
+         unlockAfterTimer](fcitx::EventSourceTime *, uint64_t) {
+          if (lifetimeWeak.expired()) {
+            return false;
+          }
+          auto *ic2 = icRef.get();
+          if (!ic2) {
+            return false;
+          }
+          auto *state = ic2->propertyFor(factory);
+          if (!state) {
+            return false;
+          }
+          auto timer = std::move(state->surroundingCommitTimer);
+          if (!unlockAfterTimer) {
+            if (!state->surroundingPendingCommit.empty()) {
+              ic2->commitString(state->surroundingPendingCommit);
+              updateSurroundingCacheAfterCommit(
+                  ic2, state->surroundingPendingCommit);
+              state->surroundingPendingCommit.clear();
+            }
+            scheduleCommitTimer(ic2, kSurroundingPostCommitDelayUsec, true);
+            return false;
+          }
+
+          state->surroundingRewriteLocked = false;
+          while (!state->surroundingRewriteLocked &&
+                 !state->surroundingQueuedKeys.empty()) {
+            const auto key = state->surroundingQueuedKeys.front();
+            state->surroundingQueuedKeys.pop_front();
+            if (!processKey(ic2, key, *state)) {
+              forwardKeyPressAndRelease(ic2, key);
+            }
+          }
+          return false;
+        });
+    if (state->surroundingCommitTimer) {
+      state->surroundingCommitTimer->setOneShot();
+    }
+  }
+
+  OpenKeyState *stateFor(fcitx::InputContext *ic) const {
+    return ic ? ic->propertyFor(deps_.factory) : nullptr;
+  }
+
   void clearRollbackSnapshot(OpenKeyState &state) const {
     state.rollbackSnapshotWord.clear();
     state.rollbackSnapshotDisplay.clear();
@@ -2696,6 +2780,9 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
       std::make_unique<BackspaceRewriteModeHandler>(std::move(rewriteDeps));
 
   SimpleModeHandlerDeps simpleDeps;
+  simpleDeps.instance = instance_;
+  simpleDeps.factory = &factory_;
+  simpleDeps.lifetimeWeak = lifetime_;
   simpleDeps.adapter = adapter_;
   simpleDeps.enableMacro = [this]() { return config_.enableMacro.value(); };
   simpleDeps.restoreIfWrongSpelling = [this]() {
