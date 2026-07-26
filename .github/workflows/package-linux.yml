@@ -18,13 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read project version
+      - name: Resolve package version
         id: version
         shell: bash
         run: |
-          version="$(sed -nE 's/^project\(fcitx5-openkey VERSION ([^ ]+) .*/\1/p' CMakeLists.txt)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(sed -nE 's/^project\(fcitx5-openkey VERSION ([^ ]+) .*/\1/p' CMakeLists.txt)"
+          fi
           if [[ -z "$version" ]]; then
-            echo "Could not read project version from CMakeLists.txt" >&2
+            echo "Could not resolve package version" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
