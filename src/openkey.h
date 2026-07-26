@@ -137,7 +137,6 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   bool canReseedRollbackSnapshot = false;
   bool noSeedNextWord = false;
   bool surroundingRewriteLocked = false;
-  std::string surroundingPendingCommit;
   std::deque<fcitx::Key> surroundingQueuedKeys;
   std::unique_ptr<fcitx::EventSourceTime> surroundingCommitTimer;
 };
