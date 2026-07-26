@@ -685,7 +685,6 @@ static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 80000};
 static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000,
                                                                        80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 10000;
-static constexpr uint64_t kSurroundingFastPathSettleDelayUsec = 20000;
 static constexpr uint64_t kSurroundingCommitDelayUsec = 3000;
 static constexpr uint64_t kSurroundingPostCommitDelayUsec = 10000;
 
@@ -2317,6 +2316,40 @@ private:
     return true;
   }
 
+  bool scheduleDelayedSurroundingCommit(fcitx::InputContext *ic,
+                                        OpenKeyState &state) {
+    auto &rewriteState = state.rewriteState;
+    if (!deps_.instance) {
+      return false;
+    }
+
+    const auto icRef = ic->watch();
+    const std::weak_ptr<void> lifetimeWeak = deps_.lifetimeWeak;
+    const uint64_t deadline =
+        fcitx::now(CLOCK_MONOTONIC) + kSurroundingCommitDelayUsec;
+    auto *loop = &deps_.instance->eventLoop();
+    rewriteState.commitTimer = loop->addTimeEvent(
+        CLOCK_MONOTONIC, deadline, 0,
+        [this, icRef, lifetimeWeak](fcitx::EventSourceTime *, uint64_t) {
+          if (lifetimeWeak.expired()) {
+            return false;
+          }
+          auto *ic2 = icRef.get();
+          auto *state2 = stateFor(ic2);
+          if (!state2) {
+            return false;
+          }
+          auto timer = std::move(state2->rewriteState.commitTimer);
+          finishPendingBackspaceCommit(ic2, *state2);
+          return false;
+        });
+    if (!rewriteState.commitTimer) {
+      return false;
+    }
+    rewriteState.commitTimer->setOneShot();
+    return true;
+  }
+
   void finishPostCommitPump(fcitx::InputContext *ic, OpenKeyState &state) {
     auto &rewriteState = state.rewriteState;
     rewriteState.commitTimer.reset();
@@ -2379,22 +2412,17 @@ private:
       // Queue a following rewrite briefly so an injected
       // backspace cannot race the surrounding-text update.
       rewriteState.rewriteLock = true;
-      if (!commitText.empty()) {
-        ic->commitString(commitText);
-        updateSurroundingCacheAfterCommit(ic, commitText);
-      }
-      rewriteState.shownText = newWord;
+      rewriteState.pendingConvertedText = commitText;
+      rewriteState.pendingShownTextAfterCommit = newWord;
       rewriteState.hasRewrittenCurrentWord =
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
 
-      // deleteSurroundingText/commitString are asynchronous at some
-      // frontends. Queue a following rewrite briefly so an injected
-      // backspace cannot race the surrounding-text update.
-      if (!schedulePostCommitPump(ic, state,
-                                  kSurroundingFastPathSettleDelayUsec)) {
-        rewriteState.rewriteLock = false;
+      if (!commitText.empty() && scheduleDelayedSurroundingCommit(ic, state)) {
+        return true;
       }
+
+      finishPendingBackspaceCommit(ic, state);
       return true;
     }
 
@@ -2433,21 +2461,15 @@ private:
         ic->deleteSurroundingText(-static_cast<int>(deleteCount), deleteCount);
         updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteCount),
                                           deleteCount);
-        if (!commitText.empty()) {
-          ic->commitString(commitText);
-          updateSurroundingCacheAfterCommit(ic, commitText);
-        }
-        rewriteState.shownText = newWord;
+        rewriteState.pendingConvertedText = commitText;
+        rewriteState.pendingShownTextAfterCommit = newWord;
         rewriteState.hasRewrittenCurrentWord =
             rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
         rewriteState.restoredFromBackspaceSnapshot = false;
-        // deleteSurroundingText/commitString are asynchronous at some
-        // frontends. Queue a following rewrite briefly so an injected
-        // backspace cannot race the surrounding-text update.
-        if (!schedulePostCommitPump(ic, state,
-                                    kSurroundingFastPathSettleDelayUsec)) {
-          rewriteState.rewriteLock = false;
+        if (!commitText.empty() && scheduleDelayedSurroundingCommit(ic, state)) {
+          return true;
         }
+        finishPendingBackspaceCommit(ic, state);
         return true;
 
     }
