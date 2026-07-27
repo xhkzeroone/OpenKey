@@ -51,7 +51,8 @@ void OpenKeyAdapter::resetCoreState() const {
 void OpenKeyAdapter::setInputType(int inputType) { vInputType = inputType; }
 void OpenKeyAdapter::setFreeMark(bool freeMark) {
   (void)freeMark;
-  vFreeMark = 0; // Hardcode to 0 to enable checkGrammar, matching Windows/macOS OpenKey behaviour
+  vFreeMark = 0; // Hardcode to 0 to enable checkGrammar, matching Windows/macOS
+                 // OpenKey behaviour
 }
 void OpenKeyAdapter::setCodeTable(int codeTable) {
   if (vCodeTable == codeTable) {

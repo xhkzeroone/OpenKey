@@ -113,7 +113,7 @@ namespace openkey {
 
 #ifdef __linux__
 constexpr int kRewriteServerNiceValue = -10;
-constexpr size_t kMinMatch = 2;
+constexpr size_t kMinMatch = 1;
 
 static bool rewriteServerPriorityEnabled() {
   const char *env = std::getenv("OPENKEY_NONPREEDIT_SERVER_PRIORITY");
@@ -677,12 +677,12 @@ struct RewriteTiming {
   uint64_t commitDelayUsec = 60000;
 };
 
-static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{10000, 40000};
+static constexpr RewriteTiming kBackspaceRewriteWaylandTiming{1000, 40000};
 static constexpr RewriteTiming kBackspaceRewriteWaylandFirefoxFamilyTiming{
-    10000, 40000};
-static constexpr RewriteTiming kBackspaceRewriteX11Timing{10000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{10000, 80000};
-static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{10000,
+    1000, 40000};
+static constexpr RewriteTiming kBackspaceRewriteX11Timing{1000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11BrowserTiming{1000, 80000};
+static constexpr RewriteTiming kBackspaceRewriteX11FirefoxFamilyTiming{1000,
                                                                        80000};
 static constexpr uint64_t kBackspaceRewritePostCommitPumpDelayUsec = 20000;
 static constexpr uint64_t kSurroundingPostCommitDelayUsec = 20000;
@@ -2007,7 +2007,7 @@ public:
           }
           if (deps_.remoteScheduleWait) {
             deps_.remoteScheduleWait(state,
-                                     state.isX11Environment ? 50000 : 30000);
+                                     state.isX11Environment ? 30000 : 10000);
           }
           event.filterAndAccept();
           return true;
