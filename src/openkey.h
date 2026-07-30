@@ -39,7 +39,6 @@ public:
 enum class RuntimeMode {
   Auto,
   BackspaceRewrite,
-  BackspaceRewriteNoSurr,
   Preedit,
   DirectCommit,
   Surrounding,
@@ -191,7 +190,6 @@ private:
   std::unique_ptr<InputModeHandler> surroundingHandler_;
   std::unique_ptr<fcitx::SimpleAction> modeAutoAction_;
   std::unique_ptr<fcitx::SimpleAction> modeNonPreeditAction_;
-  std::unique_ptr<fcitx::SimpleAction> modeFixNonPreeditAction_;
   std::unique_ptr<fcitx::SimpleAction> modePreeditAction_;
   std::unique_ptr<fcitx::SimpleAction> modeSurroundingAction_;
   std::unique_ptr<fcitx::SimpleAction> modeDirectAction_;

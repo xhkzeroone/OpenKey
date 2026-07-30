@@ -603,8 +603,6 @@ static std::string runtimeModeToString(RuntimeMode mode) {
     return "preedit";
   case RuntimeMode::BackspaceRewrite:
     return "nonPreedit";
-  case RuntimeMode::BackspaceRewriteNoSurr:
-    return "fixNonPreedit";
   case RuntimeMode::DirectCommit:
     return "direct";
   case RuntimeMode::Surrounding:
@@ -625,10 +623,6 @@ static bool runtimeModeFromString(const std::string &mode, RuntimeMode &out) {
   }
   if (equalsASCIIInsensitive(mode, "nonPreedit")) {
     out = RuntimeMode::BackspaceRewrite;
-    return true;
-  }
-  if (equalsASCIIInsensitive(mode, "fixNonPreedit")) {
-    out = RuntimeMode::BackspaceRewriteNoSurr;
     return true;
   }
   if (equalsASCIIInsensitive(mode, "direct")) {
@@ -2357,7 +2351,6 @@ private:
 
     if (!state.surroundingTextReliabilityKnown && !browserAutocomplete &&
         deps_.enableSurroundingFastPath && deps_.enableSurroundingFastPath() &&
-        state.mode != RuntimeMode::BackspaceRewriteNoSurr &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
       const auto &st = ic->surroundingText();
       if (st.isValid()) {
@@ -2766,9 +2759,6 @@ OpenKeyEngine::~OpenKeyEngine() {
     if (modeNonPreeditAction_) {
       uiManager.unregisterAction(modeNonPreeditAction_.get());
     }
-    if (modeFixNonPreeditAction_) {
-      uiManager.unregisterAction(modeFixNonPreeditAction_.get());
-    }
     if (modePreeditAction_) {
       uiManager.unregisterAction(modePreeditAction_.get());
     }
@@ -2781,7 +2771,6 @@ OpenKeyEngine::~OpenKeyEngine() {
   }
   modeAutoAction_.reset();
   modeNonPreeditAction_.reset();
-  modeFixNonPreeditAction_.reset();
   modePreeditAction_.reset();
   modeSurroundingAction_.reset();
   modeDirectAction_.reset();
@@ -2817,8 +2806,6 @@ std::string OpenKeyEngine::subModeLabelImpl(const fcitx::InputMethodEntry &,
       return "Preedit";
     case RuntimeMode::BackspaceRewrite:
       return "Non Preedit";
-    case RuntimeMode::BackspaceRewriteNoSurr:
-      return "Fix Non Preedit";
     case RuntimeMode::DirectCommit:
       return "Direct";
     case RuntimeMode::Surrounding:
@@ -2848,8 +2835,6 @@ std::string OpenKeyEngine::subMode(const fcitx::InputMethodEntry &,
     return "Preedit";
   case RuntimeMode::BackspaceRewrite:
     return "Non Preedit";
-  case RuntimeMode::BackspaceRewriteNoSurr:
-    return "Fix Non Preedit";
   case RuntimeMode::DirectCommit:
     return "Direct";
   case RuntimeMode::Surrounding:
@@ -3279,9 +3264,7 @@ RuntimeMode OpenKeyEngine::decideMode(fcitx::InputContext *ic, OpenKeyState &s,
   if (!normalizedProgram.empty() && it != appModeMap.end() &&
       it->second != RuntimeMode::Auto) {
     const bool hasRewriteServer = rewriteServerAvailable();
-    if ((it->second == RuntimeMode::BackspaceRewrite ||
-         it->second == RuntimeMode::BackspaceRewriteNoSurr) &&
-        hasRewriteServer) {
+    if (it->second == RuntimeMode::BackspaceRewrite && hasRewriteServer) {
       return it->second;
     }
     if (it->second == RuntimeMode::Preedit ||
@@ -3335,9 +3318,6 @@ void OpenKeyEngine::setupModeMenuActions() {
       makeModeAction("openkey-mode-auto", "Auto", RuntimeMode::Auto);
   modeNonPreeditAction_ = makeModeAction(
       "openkey-mode-nonpreedit", "Non Preedit", RuntimeMode::BackspaceRewrite);
-  modeFixNonPreeditAction_ =
-      makeModeAction("openkey-mode-fix-nonpreedit", "Fix Non Preedit",
-                     RuntimeMode::BackspaceRewriteNoSurr);
   modePreeditAction_ =
       makeModeAction("openkey-mode-preedit", "Preedit", RuntimeMode::Preedit);
   modeSurroundingAction_ = makeModeAction(
@@ -3354,8 +3334,6 @@ void OpenKeyEngine::addModeMenuToStatusArea(fcitx::InputContext *ic) {
   statusArea.addAction(fcitx::StatusGroup::InputMethod, modeAutoAction_.get());
   statusArea.addAction(fcitx::StatusGroup::InputMethod,
                        modeNonPreeditAction_.get());
-  statusArea.addAction(fcitx::StatusGroup::InputMethod,
-                       modeFixNonPreeditAction_.get());
   statusArea.addAction(fcitx::StatusGroup::InputMethod,
                        modePreeditAction_.get());
   statusArea.addAction(fcitx::StatusGroup::InputMethod,
@@ -3417,8 +3395,6 @@ void OpenKeyEngine::refreshModeMenu(fcitx::InputContext *ic) {
   modeAutoAction_->setChecked(!state->manualMode);
   modeNonPreeditAction_->setChecked(
       state->manualMode && state->mode == RuntimeMode::BackspaceRewrite);
-  modeFixNonPreeditAction_->setChecked(
-      state->manualMode && state->mode == RuntimeMode::BackspaceRewriteNoSurr);
   modePreeditAction_->setChecked(state->manualMode &&
                                  state->mode == RuntimeMode::Preedit);
   modeSurroundingAction_->setChecked(state->manualMode &&
@@ -3428,7 +3404,6 @@ void OpenKeyEngine::refreshModeMenu(fcitx::InputContext *ic) {
 
   modeAutoAction_->update(ic);
   modeNonPreeditAction_->update(ic);
-  modeFixNonPreeditAction_->update(ic);
   modePreeditAction_->update(ic);
   modeSurroundingAction_->update(ic);
   modeDirectAction_->update(ic);
@@ -3488,8 +3463,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     if (!state->manualMode) {
       nextMode = RuntimeMode::BackspaceRewrite;
     } else if (state->mode == RuntimeMode::BackspaceRewrite) {
-      nextMode = RuntimeMode::BackspaceRewriteNoSurr;
-    } else if (state->mode == RuntimeMode::BackspaceRewriteNoSurr) {
       nextMode = RuntimeMode::Preedit;
     } else if (state->mode == RuntimeMode::Preedit) {
       nextMode = RuntimeMode::Surrounding;
@@ -3552,8 +3525,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
           return "Preedit";
         case RuntimeMode::BackspaceRewrite:
           return "Non Preedit";
-        case RuntimeMode::BackspaceRewriteNoSurr:
-          return "Fix Non Preedit";
         case RuntimeMode::DirectCommit:
           return "Direct";
         case RuntimeMode::Surrounding:
@@ -3659,7 +3630,6 @@ void OpenKeyEngine::keyEvent(const fcitx::InputMethodEntry &,
     }
     return;
   case RuntimeMode::BackspaceRewrite:
-  case RuntimeMode::BackspaceRewriteNoSurr:
     if (backspaceRewriteHandler_) {
       backspaceRewriteHandler_->handleKey(ic, event, *state);
     }
