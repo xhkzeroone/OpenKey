@@ -1203,7 +1203,6 @@ struct BackspaceRewriteDeps {
   std::function<bool()> enableMacro;
   std::function<bool()> restoreIfWrongSpelling;
   std::function<bool()> enableBackspaceSnapshot;
-  std::function<bool()> rawBackspaceRewriteEnabled;
   std::function<bool()> enableSurroundingFastPath;
   std::function<bool()> remoteEnabled;
   std::function<bool(fcitx::InputContext *, OpenKeyState &, unsigned int,
@@ -1366,8 +1365,7 @@ private:
           clearState("bs_delete_too_large");
           return false;
         }
-        scheduleRewrite(ic, state, deleteChars,
-                        newDisplay.substr(prefixLen));
+        scheduleRewrite(ic, state, deleteChars, newDisplay.substr(prefixLen));
         state.rollbackDisplay = std::move(newDisplay);
         if (!state.rollbackRawBuffer.empty()) {
           state.rollbackRawBuffer.pop_back();
@@ -1603,15 +1601,9 @@ private:
                      << " newWord=" << r.newWord;
       }
 
-      const std::string oldWord = state.rollbackWord;
       state.rollbackWord = r.newWord;
       state.rollbackDisplay = r.newWord;
-      if (deps_.adapter->isToneKey(c) || deps_.adapter->isRemoveToneKey(c)) {
-        deps_.adapter->adjustRawBufferForTone(state.rollbackRawBuffer, oldWord,
-                                              r.newWord, c);
-      } else {
-        state.rollbackRawBuffer.push_back(c);
-      }
+      state.rollbackRawBuffer.push_back(c);
       state.lastCommitted = state.rollbackDisplay;
       return true;
     }
@@ -1673,8 +1665,8 @@ private:
     auto *factory = deps_.factory;
     state->surroundingCommitTimer = loop->addTimeEvent(
         CLOCK_MONOTONIC, deadline, 0,
-        [this, icRef, lifetimeWeak,
-         factory](fcitx::EventSourceTime *, uint64_t) {
+        [this, icRef, lifetimeWeak, factory](fcitx::EventSourceTime *,
+                                             uint64_t) {
           if (lifetimeWeak.expired()) {
             return false;
           }
@@ -1974,18 +1966,6 @@ public:
     };
 
     if (event.isRelease()) {
-      if (isBackspace() && rewriteState.rawBackspaceAwaitingRelease) {
-        rewriteState.rawBackspaceAwaitingRelease = false;
-        if (!deps_.remoteEnabled || !deps_.remoteEnabled() ||
-            !deps_.remoteSchedule) {
-          return false;
-        }
-        adapterShared->setCodeTable(state.codeTable);
-        const std::string converted =
-            adapterShared->convertRawBuffer(rewriteState.rawAsciiBuffer);
-        applyWordDelta(ic, state, debug, converted, 0, "raw-backspace", false);
-        return false; // let the release go to the app
-      }
       return false;
     }
 
@@ -2025,21 +2005,6 @@ public:
         return true;
       }
 
-      bool rawBackspaceRewrite = deps_.rawBackspaceRewriteEnabled &&
-                                 deps_.rawBackspaceRewriteEnabled();
-      if (rawBackspaceRewrite && !rewriteState.shownText.empty() &&
-          !rewriteState.rawAsciiBuffer.empty()) {
-        rewriteState.rawBackspaceAwaitingRelease = true;
-        rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
-        rewriteState.rawAsciiBuffer.pop_back();
-        if (rewriteState.shownText.empty()) {
-          rewriteState.rawAsciiBuffer.clear();
-          rewriteState.hasRewrittenCurrentWord = false;
-        }
-        return false;
-      }
-
-      // Fallback for non-raw-backspace
       if (!rewriteState.shownText.empty()) {
         rewriteState.shownText = utf8DropLastN(rewriteState.shownText, 1);
         if (!rewriteState.rawAsciiBuffer.empty()) {
@@ -2050,6 +2015,7 @@ public:
           rewriteState.hasRewrittenCurrentWord = false;
         }
       }
+      updateSurroundingCacheAfterDelete(ic, -1, 1);
       return false; // để app tự xóa ký tự trên màn hình
     }
 
@@ -2345,8 +2311,10 @@ private:
         rewriteState.shownText.substr(0, prefixLen);
     const bool browserAutocomplete =
         deleteCount > 0 && isBrowserLikeProgram(state) &&
-        !rewriteState.hasRewrittenCurrentWord &&
         looksLikeBrowserAutocomplete(ic, rewriteState.shownText);
+    // Lưu deleteCount thực sự trong surrounding text (không tính inline
+    // autocomplete)
+    const unsigned int cacheDeleteCount = deleteCount;
     if (browserAutocomplete) {
       deleteCount += 1;
     }
@@ -2388,8 +2356,7 @@ private:
     }
 
     if (!state.surroundingTextReliabilityKnown && !browserAutocomplete &&
-        deps_.enableSurroundingFastPath &&
-        deps_.enableSurroundingFastPath() &&
+        deps_.enableSurroundingFastPath && deps_.enableSurroundingFastPath() &&
         state.mode != RuntimeMode::BackspaceRewriteNoSurr &&
         ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
       const auto &st = ic->surroundingText();
@@ -2412,30 +2379,29 @@ private:
       state.surroundingTextReliabilityKnown = true;
     }
 
-    if (state.surroundingTextReliable) {
-        if (debug) {
-          FCITX_INFO() << "openkey: backspace-rewrite fast path ST deleteCount="
-                       << deleteCount;
-        }
-        // deleteSurroundingText/commitString are asynchronous at some
-        rewriteState.rewriteLock = true;
-        ic->deleteSurroundingText(-static_cast<int>(deleteCount), deleteCount);
-        updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteCount),
-                                          deleteCount);
-        if (!commitText.empty()) {
-          ic->commitString(commitText);
-          updateSurroundingCacheAfterCommit(ic, commitText);
-        }
-        rewriteState.shownText = newWord;
-        rewriteState.hasRewrittenCurrentWord =
-            rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
-        rewriteState.restoredFromBackspaceSnapshot = false;
-        if (!schedulePostCommitPump(ic, state,
-                                    kBackspaceRewritePostCommitPumpDelayUsec)) {
-          rewriteState.rewriteLock = false;
-        }
-        return true;
-
+    if (state.surroundingTextReliable && !browserAutocomplete) {
+      if (debug) {
+        FCITX_INFO() << "openkey: backspace-rewrite fast path ST deleteCount="
+                     << deleteCount;
+      }
+      // deleteSurroundingText/commitString are asynchronous at some
+      rewriteState.rewriteLock = true;
+      ic->deleteSurroundingText(-static_cast<int>(deleteCount), deleteCount);
+      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteCount),
+                                        deleteCount);
+      if (!commitText.empty()) {
+        ic->commitString(commitText);
+        updateSurroundingCacheAfterCommit(ic, commitText);
+      }
+      rewriteState.shownText = newWord;
+      rewriteState.hasRewrittenCurrentWord =
+          rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
+      rewriteState.restoredFromBackspaceSnapshot = false;
+      if (!schedulePostCommitPump(ic, state,
+                                  kBackspaceRewritePostCommitPumpDelayUsec)) {
+        rewriteState.rewriteLock = false;
+      }
+      return true;
     }
 
     if (deps_.remoteEnabled && deps_.remoteEnabled() && deps_.remoteSchedule) {
@@ -2450,9 +2416,11 @@ private:
           rewriteState.hasRewrittenCurrentWord || (newWord != rawAppend);
       rewriteState.restoredFromBackspaceSnapshot = false;
 
-      // TODO: check again
-      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(deleteCount),
-                                        deleteCount);
+      // Chỉ xoá cache theo số ký tự thực sự trong surrounding text.
+      // deleteCount có thể đã tăng +1 cho inline autocomplete của browser,
+      // cái đó không nằm trong cache.
+      updateSurroundingCacheAfterDelete(ic, -static_cast<int>(cacheDeleteCount),
+                                        cacheDeleteCount);
 
       if (deps_.remoteSchedule(ic, state, deleteCount, timing.interKeyUsec,
                                timing.commitDelayUsec)) {
@@ -2593,6 +2561,7 @@ private:
         rewriteState.rawAsciiBuffer.clear();
         rewriteState.hasRewrittenCurrentWord = false;
       }
+      updateSurroundingCacheAfterDelete(ic, -1, 1);
       return true;
     }
 
@@ -2659,13 +2628,7 @@ private:
           clearComposeState(state, "adapter-not-handled");
           return false;
         }
-        if (adapterShared->isToneKey(c) || adapterShared->isRemoveToneKey(c)) {
-          adapterShared->adjustRawBufferForTone(rewriteState.rawAsciiBuffer,
-                                                rewriteState.shownText,
-                                                r.newWord, c);
-        } else {
-          rewriteState.rawAsciiBuffer.push_back(c);
-        }
+        rewriteState.rawAsciiBuffer.push_back(c);
         return applyWordDelta(ic, state, debug, r.newWord, c, "ascii");
       }
     }
@@ -2738,9 +2701,6 @@ OpenKeyEngine::OpenKeyEngine(fcitx::Instance *instance)
   };
   rewriteDeps.enableBackspaceSnapshot = [this]() {
     return config_.enableBackspaceSnapshot.value();
-  };
-  rewriteDeps.rawBackspaceRewriteEnabled = [this]() {
-    return config_.enableRawBackspaceRewrite.value();
   };
   rewriteDeps.enableSurroundingFastPath = [this]() {
     return config_.enableSurroundingFastPath.value();

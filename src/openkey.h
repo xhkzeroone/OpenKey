@@ -19,7 +19,7 @@
 namespace fcitx {
 class Instance;
 class SimpleAction;
-}
+} // namespace fcitx
 
 namespace openkey {
 
@@ -59,7 +59,6 @@ struct BackspaceRewriteState {
   std::unique_ptr<fcitx::EventSourceTime> commitTimer;
   std::string pendingConvertedText;
   std::string pendingShownTextAfterCommit;
-  bool rawBackspaceAwaitingRelease = false;
   bool suppressBackspaceRelease = false;
   uint64_t remoteSessionId = 0;
   uint64_t remoteNextTxId = 1;
@@ -94,7 +93,6 @@ struct BackspaceRewriteState {
     commitTimer.reset();
     pendingConvertedText.clear();
     pendingShownTextAfterCommit.clear();
-    rawBackspaceAwaitingRelease = false;
     remotePendingTxId = 0;
     remoteRewritePending = false;
     backspaceSnapshotShownText.clear();
@@ -123,7 +121,8 @@ struct OpenKeyState : public fcitx::InputContextProperty {
   bool isX11Environment = false;
   bool surroundingTextReliabilityKnown = false;
   bool surroundingTextReliable = false;
-  // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển thị.
+  // Cờ đánh dấu sử dụng tạm Preedit cho từ đầu tiên trên X11 để tránh lỗi hiển
+  // thị.
   bool x11FirstWordPreedit = false;
   // SurroundingTextModeHandler states
   std::string macroBuffer;
@@ -197,7 +196,8 @@ private:
   std::unique_ptr<fcitx::SimpleAction> modeSurroundingAction_;
   std::unique_ptr<fcitx::SimpleAction> modeDirectAction_;
 
-  // Lưu lại thời điểm gõ phím cuối cùng toàn cục (tránh bị reset khi app gọi activate liên tục)
+  // Lưu lại thời điểm gõ phím cuối cùng toàn cục (tránh bị reset khi app gọi
+  // activate liên tục)
   uint64_t lastKeyTime_ = 0;
   bool isX11Environment_ = false;
 

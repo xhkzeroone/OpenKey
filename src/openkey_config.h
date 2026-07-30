@@ -67,11 +67,6 @@ FCITX_CONFIGURATION(
         "EnableBackspaceSnapshot",
         N_("Cho phép Backspace quay lại sửa từ vừa gõ"),
         true};
-    fcitx::Option<bool> enableRawBackspaceRewrite{
-        this,
-        "EnableRawBackspaceRewrite",
-        N_("Bật xoá chậm rãi (xoá từng ký tự raw)"),
-        false};
     fcitx::Option<bool> enableSurroundingFastPath{
         this,
         "EnableSurroundingFastPath",
